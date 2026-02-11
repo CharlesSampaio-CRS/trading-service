@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
-use crate::models::{Balance, Order};
+use crate::models::Balance;
 
 pub struct CCXTClient {
     exchange: Py<PyAny>,

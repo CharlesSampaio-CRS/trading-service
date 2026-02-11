@@ -144,7 +144,7 @@ pub async fn get_exchange_rate(
 ) -> HttpResponse {
     log::info!("💱 GET /external/exchange-rate?from={}&to={}", query.from, query.to);
 
-    match exchange_rate_service::get_exchange_rate_cached(&query.from, &query.to).await {
+    match exchange_rate_service::get_exchange_rate(&query.from, &query.to).await {
         Ok(rate) => {
             log::info!("✅ Exchange rate {}/{}: {:.4}", query.from, query.to, rate);
             HttpResponse::Ok().json(serde_json::json!({

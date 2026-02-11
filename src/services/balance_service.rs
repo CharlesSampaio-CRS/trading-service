@@ -314,7 +314,7 @@ async fn fetch_exchange_balance(exchange: DecryptedExchange) -> Result<ExchangeB
                 // Spawna task em paralelo (não bloqueia)
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(500),
-                    crate::services::exchange_rate_service::get_exchange_rate_cached("BRL", "USD")
+                    crate::services::exchange_rate_service::get_exchange_rate("BRL", "USD")
                 ).await {
                     Ok(Ok(rate)) => {
                         let original_total = total_usd;
@@ -574,24 +574,6 @@ pub async fn get_daily_pnl(
             pnl_usd,
             pnl_percent,
         },
-    })
-}
-
-// Clear balance cache
-#[derive(serde::Serialize)]
-pub struct ClearCacheResponse {
-    pub success: bool,
-    pub message: String,
-}
-
-pub async fn clear_balance_cache(
-    db: &MongoDB,
-    user_id: &str,
-) -> Result<ClearCacheResponse, String> {
-    // Simplified - would clear Redis/cache layer
-    Ok(ClearCacheResponse {
-        success: true,
-        message: "Cache cleared successfully".to_string(),
     })
 }
 

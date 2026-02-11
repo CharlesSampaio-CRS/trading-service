@@ -115,12 +115,12 @@ async fn main() -> std::io::Result<()> {
                     .route("/{exchange_id}/token/{symbol}", web::get().to(api::exchanges::get_token_details))
             )
             
-            // Tokens: Global catalog (READ ONLY) + MongoDB cache
+            // Tokens: Global catalog (READ ONLY)
             .service(
                 web::scope("/api/v1/tokens")
                     .route("", web::get().to(api::tokens::get_tokens))
                     .route("/available", web::get().to(api::tokens::get_available_tokens))
-                    .route("/by-ccxt", web::get().to(api::tokens::get_available_tokens_by_ccxt))  // Get tokens by CCXT ID (MongoDB cache)
+                    .route("/by-ccxt", web::get().to(api::tokens::get_available_tokens_by_ccxt))  // Get tokens by CCXT ID
                     .route("/search", web::get().to(api::tokens::search_tokens))
                     .route("/details", web::post().to(api::tokens::get_token_details_with_creds))  // Zero Database: receives credentials
                     .route("/{symbol}", web::get().to(api::tokens::get_token))  // DEVE FICAR POR ÚLTIMO (catch-all)

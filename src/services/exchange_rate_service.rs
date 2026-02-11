@@ -153,58 +153,6 @@ pub async fn usd_to_brl(amount_usd: f64) -> Result<f64, String> {
     Ok(amount_usd * rate)
 }
 
-/// Cache de taxas de câmbio (em memória)
-use std::sync::Mutex;
-use lazy_static::lazy_static;
-
-#[derive(Debug, Clone)]
-struct CachedRate {
-    rate: f64,
-    timestamp: std::time::Instant,
-}
-
-lazy_static! {
-    static ref RATE_CACHE: Mutex<HashMap<String, CachedRate>> = Mutex::new(HashMap::new());
-}
-
-const CACHE_TTL_SECONDS: u64 = 3600; // 1 hora
-
-/// Busca taxa com cache (1 hora de TTL)
-pub async fn get_exchange_rate_cached(
-    from: &str,
-    to: &str,
-) -> Result<f64, String> {
-    let cache_key = format!("{}_{}", from.to_uppercase(), to.to_uppercase());
-    
-    // Tenta buscar do cache
-    {
-        let cache = RATE_CACHE.lock().unwrap();
-        if let Some(cached) = cache.get(&cache_key) {
-            let elapsed = cached.timestamp.elapsed().as_secs();
-            if elapsed < CACHE_TTL_SECONDS {
-                log::debug!("📦 Using cached rate for {}: {:.4} (age: {}s)", 
-                    cache_key, cached.rate, elapsed);
-                return Ok(cached.rate);
-            }
-        }
-    }
-    
-    // Busca nova taxa
-    let rate = get_exchange_rate(from, to).await?;
-    
-    // Atualiza cache
-    {
-        let mut cache = RATE_CACHE.lock().unwrap();
-        cache.insert(cache_key.clone(), CachedRate {
-            rate,
-            timestamp: std::time::Instant::now(),
-        });
-        log::debug!("💾 Cached rate for {}: {:.4}", cache_key, rate);
-    }
-    
-    Ok(rate)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

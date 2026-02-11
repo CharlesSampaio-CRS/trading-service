@@ -10,6 +10,8 @@ use actix_cors::Cors;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use dotenv::dotenv;
 use std::env;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -59,6 +61,8 @@ async fn main() -> std::io::Result<()> {
     
     log::info!("✅ MongoDB connected successfully");
     log::info!("🌐 Server starting on {}:{}", host, port);
+    log::info!("📚 Swagger UI available at: http://{}:{}/swagger-ui/", host, port);
+    log::info!("📄 OpenAPI spec at: http://{}:{}/api-docs/openapi.json", host, port);
     
     // Start HTTP server
     HttpServer::new(move || {
@@ -83,12 +87,20 @@ async fn main() -> std::io::Result<()> {
             .supports_credentials()
             .max_age(3600);
         
+        // Generate OpenAPI specification
+        let openapi = api::swagger::ApiDoc::openapi();
+        
         App::new()
             .app_data(db_data.clone())
             .wrap(cors)
             .wrap(middleware::SecurityHeaders)
             .wrap(Logger::default())
             .wrap(Logger::new("%a %{User-Agent}i"))
+            // Swagger UI with authentication
+            .service(
+                SwaggerUi::new("/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", openapi.clone())
+            )
             // Health check
             .route("/health", web::get().to(api::health::health_check))
             // Metrics

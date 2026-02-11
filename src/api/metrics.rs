@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static REQUEST_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -12,6 +13,20 @@ pub fn increment_error_count() {
     ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub struct MetricsResponse {
+    pub http_requests_total: u64,
+    pub http_errors_total: u64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    tag = "Health",
+    responses(
+        (status = 200, description = "System metrics", body = MetricsResponse)
+    )
+)]
 pub async fn get_metrics() -> HttpResponse {
     let requests = REQUEST_COUNT.load(Ordering::Relaxed);
     let errors = ERROR_COUNT.load(Ordering::Relaxed);

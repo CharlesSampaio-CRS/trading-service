@@ -56,13 +56,13 @@ fn default_is_active() -> bool {
 }
 
 // Request/Response structures
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RegisterRequest {
     pub email: String,
     pub password: String,
@@ -74,7 +74,7 @@ pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthResponse {
     pub success: bool,
     pub token: String,
@@ -82,7 +82,7 @@ pub struct AuthResponse {
     pub user: UserInfo,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UserInfo {
     pub id: String,
     pub email: String,
@@ -96,6 +96,16 @@ pub struct GoogleAuthUrlResponse {
     pub success: bool,
     pub auth_url: String,
     pub state: String,
+}
+
+// Type aliases for API documentation
+pub type LoginResponse = AuthResponse;
+pub type RegisterResponse = AuthResponse;
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct VerifyTokenResponse {
+    pub valid: bool,
+    pub user: Option<UserInfo>,
 }
 
 fn get_jwt_secret() -> String {

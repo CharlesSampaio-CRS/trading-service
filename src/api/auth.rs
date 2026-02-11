@@ -1,7 +1,19 @@
 use actix_web::{web, HttpResponse, HttpRequest};
 use crate::{database::MongoDB, services::auth_service};
+use crate::services::auth_service::{LoginRequest, RegisterRequest, AuthResponse};
 use base64::Engine;
+use utoipa::OpenApi;
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/login",
+    tag = "Auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = AuthResponse),
+        (status = 401, description = "Invalid credentials")
+    )
+)]
 pub async fn login(
     db: web::Data<MongoDB>,
     request: web::Json<auth_service::LoginRequest>,
@@ -23,6 +35,16 @@ pub async fn login(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/register",
+    tag = "Auth",
+    request_body = RegisterRequest,
+    responses(
+        (status = 201, description = "Registration successful", body = AuthResponse),
+        (status = 400, description = "Invalid request or user already exists")
+    )
+)]
 pub async fn register(
     db: web::Data<MongoDB>,
     request: web::Json<auth_service::RegisterRequest>,

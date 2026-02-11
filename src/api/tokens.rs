@@ -25,7 +25,11 @@ pub struct AvailableTokensByCcxtIdQuery {
     tag = "Tokens",
     responses(
         (status = 200, description = "List of all tokens"),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
     )
 )]
 pub async fn get_tokens(
@@ -87,7 +91,11 @@ pub async fn get_token(
     ),
     responses(
         (status = 200, description = "Search results"),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
     )
 )]
 pub async fn search_tokens(

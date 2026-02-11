@@ -44,8 +44,12 @@ pub struct AllRatesQuery {
     ),
     responses(
         (status = 200, description = "Token information from CoinGecko"),
+        (status = 401, description = "Unauthorized"),
         (status = 404, description = "Token not found"),
         (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
     )
 )]
 pub async fn get_token_info(
@@ -85,7 +89,11 @@ pub async fn get_token_info(
     ),
     responses(
         (status = 200, description = "Search results from CoinGecko"),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
     )
 )]
 pub async fn search_token(
@@ -168,7 +176,11 @@ pub async fn get_batch_prices(
     ),
     responses(
         (status = 200, description = "Exchange rate retrieved"),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
     )
 )]
 pub async fn get_exchange_rate(

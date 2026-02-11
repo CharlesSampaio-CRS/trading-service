@@ -14,7 +14,11 @@ pub struct TokenDetailsQuery {
     tag = "Exchanges",
     responses(
         (status = 200, description = "List of available exchanges", body = AvailableExchangesResponse),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
     )
 )]
 pub async fn get_available_exchanges(db: web::Data<MongoDB>) -> HttpResponse {

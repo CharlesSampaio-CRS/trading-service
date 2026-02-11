@@ -1,0 +1,23 @@
+[package]
+name = "trading-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.42", features = ["full"] }
+mongodb = "3.2.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+pyo3 = { version = "0.22", features = ["auto-initialize"] }
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+dotenv = "0.15"
+
+[lib]
+name = "trading_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trading-service"
+path = "src/main.rs"

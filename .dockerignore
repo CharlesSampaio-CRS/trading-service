@@ -1,0 +1,40 @@
+# Ignorar arquivos desnecessários no build
+target/
+.git/
+.gitignore
+.env
+*.log
+
+# Rust
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Outros
+node_modules/
+
+# Arquivos de documentação e deploy (não necessários no container)
+*.md
+deploy.sh
+deploy-aws.md
+docker-compose.yml
+task-definition.json

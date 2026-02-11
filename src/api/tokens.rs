@@ -19,6 +19,15 @@ pub struct AvailableTokensByCcxtIdQuery {
     pub quote: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/tokens",
+    tag = "Tokens",
+    responses(
+        (status = 200, description = "List of all tokens"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn get_tokens(
     db: web::Data<MongoDB>,
 ) -> HttpResponse {
@@ -69,6 +78,18 @@ pub async fn get_token(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/tokens/search",
+    tag = "Tokens",
+    params(
+        ("q" = String, Query, description = "Search query")
+    ),
+    responses(
+        (status = 200, description = "Search results"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn search_tokens(
     db: web::Data<MongoDB>,
     query: web::Query<TokenSearchQuery>,

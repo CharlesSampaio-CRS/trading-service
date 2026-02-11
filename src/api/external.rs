@@ -35,8 +35,19 @@ pub struct AllRatesQuery {
     pub base: String,
 }
 
-/// GET /api/v1/external/token/info?coingecko_id=bitcoin
-/// Retorna informações detalhadas de um token do CoinGecko
+#[utoipa::path(
+    get,
+    path = "/api/v1/external/token/info",
+    tag = "External",
+    params(
+        ("coingecko_id" = String, Query, description = "CoinGecko token ID")
+    ),
+    responses(
+        (status = 200, description = "Token information from CoinGecko"),
+        (status = 404, description = "Token not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn get_token_info(
     query: web::Query<TokenInfoQuery>,
 ) -> HttpResponse {
@@ -65,8 +76,18 @@ pub async fn get_token_info(
     }
 }
 
-/// GET /api/v1/external/token/search?symbol=BTC
-/// Busca tokens no CoinGecko por símbolo
+#[utoipa::path(
+    get,
+    path = "/api/v1/external/token/search",
+    tag = "External",
+    params(
+        ("symbol" = String, Query, description = "Token symbol to search")
+    ),
+    responses(
+        (status = 200, description = "Search results from CoinGecko"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn search_token(
     query: web::Query<TokenSearchQuery>,
 ) -> HttpResponse {
@@ -137,8 +158,19 @@ pub async fn get_batch_prices(
     }
 }
 
-/// GET /api/v1/external/exchange-rate?from=USD&to=BRL
-/// Retorna taxa de câmbio entre duas moedas
+#[utoipa::path(
+    get,
+    path = "/api/v1/external/exchange-rate",
+    tag = "External",
+    params(
+        ("from" = String, Query, description = "Source currency code"),
+        ("to" = String, Query, description = "Target currency code")
+    ),
+    responses(
+        (status = 200, description = "Exchange rate retrieved"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 pub async fn get_exchange_rate(
     query: web::Query<ExchangeRateQuery>,
 ) -> HttpResponse {

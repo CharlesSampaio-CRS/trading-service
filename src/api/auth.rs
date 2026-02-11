@@ -1,6 +1,6 @@
 use actix_web::{web, HttpResponse, HttpRequest};
 use crate::{database::MongoDB, services::auth_service};
-use crate::services::auth_service::{LoginRequest, RegisterRequest, AuthResponse};
+use crate::services::auth_service::{LoginRequest, RegisterRequest, AuthResponse, UserInfo};
 use base64::Engine;
 use utoipa::OpenApi;
 
@@ -49,15 +49,17 @@ pub async fn register(
     db: web::Data<MongoDB>,
     request: web::Json<auth_service::RegisterRequest>,
 ) -> HttpResponse {
-    log::info!("📝 POST /auth/register - email: {}", request.email);
+    let email_str = request.email.as_deref().unwrap_or("N/A");
+    let provider = request.provider.as_deref().unwrap_or("local");
+    log::info!("📝 POST /auth/register - email: {}, provider: {}", email_str, provider);
     
     match auth_service::register(&db, &request).await {
         Ok(response) => {
-            log::info!("✅ Registration successful: {}", request.email);
+            log::info!("✅ Registration successful: {}", email_str);
             HttpResponse::Created().json(response)
         }
         Err(e) => {
-            log::warn!("❌ Registration failed: {} - {}", request.email, e);
+            log::warn!("❌ Registration failed: {} - {}", email_str, e);
             HttpResponse::BadRequest().json(serde_json::json!({
                 "success": false,
                 "error": e
@@ -87,6 +89,18 @@ pub async fn refresh_token(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/verify",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Token is valid"),
+        (status = 401, description = "Invalid or expired token")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 pub async fn verify_token(
     req: HttpRequest,
 ) -> HttpResponse {
@@ -130,6 +144,18 @@ pub async fn verify_token(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/me",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "User information retrieved", body = UserInfo),
+        (status = 401, description = "Unauthorized")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 pub async fn get_me(
     db: web::Data<MongoDB>,
     req: HttpRequest,

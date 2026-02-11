@@ -9,14 +9,14 @@ use crate::{
 use mongodb::bson::{doc, oid::ObjectId};
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AvailableExchangesResponse {
     pub success: bool,
     pub exchanges: Vec<ExchangeCatalogInfo>,
     pub count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ExchangeCatalogInfo {
     #[serde(rename = "_id")]
     pub id: String,

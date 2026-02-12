@@ -9,6 +9,7 @@ pub fn increment_request_count() {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
+#[allow(dead_code)]
 pub fn increment_error_count() {
     ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
 }

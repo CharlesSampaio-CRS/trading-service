@@ -22,6 +22,12 @@ tar -czf /tmp/app-update.tar.gz src/ Cargo.toml Cargo.lock requirements.txt 2>/d
 echo "📤 Enviando..."
 scp -i "$KEY_FILE" -q /tmp/app-update.tar.gz ubuntu@"$SERVER_IP":~/
 
+# Enviar .env separadamente (garantir que vai)
+if [ -f .env ]; then
+    scp -i "$KEY_FILE" -q .env ubuntu@"$SERVER_IP":~/trading-service/
+    echo "✓ .env enviado"
+fi
+
 # Compilar e reiniciar
 echo "🔧 Compilando no servidor..."
 ssh -i "$KEY_FILE" ubuntu@"$SERVER_IP" << 'ENDSSH'

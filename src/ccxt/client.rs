@@ -572,5 +572,76 @@ impl CCXTClient {
             Ok(markets.into())
         })
     }
+    
+    /// Search market symbols by query string
+    pub fn search_markets_symbols_sync(&self, query: &str, limit: usize) -> Result<Vec<String>, String> {
+        Python::with_gil(|py| {
+            let markets = self.exchange
+                .as_ref(py)
+                .call_method0("fetch_markets")
+                .map_err(|e| format!("Failed to fetch markets: {}", e))?;
+
+            let query_upper = query.trim().to_uppercase();
+            if query_upper.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            let mut symbols = Vec::new();
+
+            if let Ok(markets_list) = markets.downcast::<PyList>() {
+                for market in markets_list.iter() {
+                    let market_dict = match market.downcast::<PyDict>() {
+                        Ok(dict) => dict,
+                        Err(_) => continue,
+                    };
+
+                    let is_active = market_dict
+                        .get_item("active")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<bool>().ok())
+                        .unwrap_or(true);
+
+                    if !is_active {
+                        continue;
+                    }
+
+                    let base_symbol = market_dict
+                        .get_item("base")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .or_else(|| {
+                            market_dict
+                                .get_item("symbol")
+                                .ok()
+                                .flatten()
+                                .and_then(|v| v.extract::<String>().ok())
+                                .and_then(|pair| pair.split('/').next().map(|v| v.to_string()))
+                        });
+
+                    let base_symbol = match base_symbol {
+                        Some(symbol) if !symbol.trim().is_empty() => symbol.to_uppercase(),
+                        _ => continue,
+                    };
+
+                    if !base_symbol.contains(&query_upper) {
+                        continue;
+                    }
+
+                    if seen.insert(base_symbol.clone()) {
+                        symbols.push(base_symbol);
+                        if symbols.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            Ok(symbols)
+        })
+    }
 }
+
 

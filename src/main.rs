@@ -134,7 +134,9 @@ async fn main() -> std::io::Result<()> {
                     .route("/available", web::get().to(api::tokens::get_available_tokens))
                     .route("/by-ccxt", web::get().to(api::tokens::get_available_tokens_by_ccxt))  // Get tokens by CCXT ID
                     .route("/search", web::get().to(api::tokens::search_tokens))
+                    .route("/search", web::post().to(api::tokens::post_token_search))  // Local-first: receives credentials
                     .route("/details", web::post().to(api::tokens::get_token_details_with_creds))  // Zero Database: receives credentials
+                    .route("/details/multi", web::post().to(api::tokens::get_token_details_multi))  // Multi-exchange comparison
                     .route("/{symbol}", web::get().to(api::tokens::get_token))  // DEVE FICAR POR ÚLTIMO (catch-all)
             )
             

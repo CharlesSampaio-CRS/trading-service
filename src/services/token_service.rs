@@ -7,6 +7,20 @@ use crate::{
 use mongodb::bson::{doc, oid::ObjectId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tokio::time::{timeout, Duration};
+
+// ============================================================================
+// EXCHANGE CREDENTIALS (Local-First Pattern)
+// ============================================================================
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ExchangeCredentials {
+    pub exchange_id: String,
+    pub ccxt_id: String,
+    pub name: String,
+    pub api_key: String,
+    pub api_secret: String,
+    pub passphrase: Option<String>,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Token {
@@ -534,3 +548,312 @@ pub async fn get_token_details_with_creds(
             .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
     })
 }
+
+// ============================================================================
+// TOKEN SEARCH WITH CREDENTIALS - LOCAL-FIRST PATTERN
+// ============================================================================
+
+pub async fn search_tokens_with_creds(
+    query: &str,
+    exchange: &ExchangeCredentials,
+) -> Result<TokensResponse, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("Search query cannot be empty".to_string());
+    }
+
+    log::info!("🔍 Searching tokens via CCXT: {} on {} ({})", 
+        query, exchange.name, exchange.ccxt_id);
+
+    let query_owned = query.to_string();
+    let ccxt_id = exchange.ccxt_id.clone();
+    let api_key = exchange.api_key.clone();
+    let api_secret = exchange.api_secret.clone();
+    let passphrase = exchange.passphrase.clone();
+
+    let fetch_task = spawn_ccxt_blocking(move || {
+        let client = CCXTClient::new(
+            &ccxt_id,
+            &api_key,
+            &api_secret,
+            passphrase.as_deref(),
+        )?;
+        client.search_markets_symbols_sync(&query_owned, 50)
+    });
+
+    match timeout(Duration::from_secs(10), fetch_task).await {
+        Ok(Ok(Ok(symbols))) => {
+            let tokens: Vec<Token> = symbols
+                .into_iter()
+                .map(|symbol| Token {
+                    _id: None,
+                    symbol: symbol.clone(),
+                    name: symbol,
+                    logo: None,
+                    decimals: None,
+                    coingecko_id: None,
+                    is_active: true,
+                })
+                .collect();
+
+            let count = tokens.len();
+            log::info!("✅ Found {} tokens via CCXT", count);
+
+            Ok(TokensResponse {
+                success: true,
+                tokens,
+                count,
+            })
+        }
+        Ok(Ok(Err(e))) => Err(format!("CCXT search failed: {}", e)),
+        Ok(Err(e)) => Err(format!("Task join error: {}", e)),
+        Err(_) => Err("CCXT search timed out".to_string()),
+    }
+}
+
+// ============================================================================
+// MULTI-EXCHANGE TOKEN DETAILS - PRICE COMPARISON & ARBITRAGE
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct MultiExchangeTokenDetails {
+    pub success: bool,
+    pub symbol: String,
+    pub exchanges: Vec<ExchangeTokenDetails>,
+    pub comparison: PriceComparison,
+    pub arbitrage_opportunities: Vec<ArbitrageOpportunity>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExchangeTokenDetails {
+    pub exchange_id: String,
+    pub exchange_name: String,
+    pub ccxt_id: String,
+    pub status: String, // "success" | "error" | "timeout"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<TokenDetailsResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PriceComparison {
+    pub best_bid: Option<BestPrice>,
+    pub best_ask: Option<BestPrice>,
+    pub max_spread_percent: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BestPrice {
+    pub exchange: String,
+    pub price: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArbitrageOpportunity {
+    pub buy_from: String,
+    pub sell_to: String,
+    pub buy_price: f64,
+    pub sell_price: f64,
+    pub profit_percent: f64,
+}
+
+pub async fn get_token_details_multi(
+    symbol: &str,
+    exchanges: &[ExchangeCredentials],
+) -> Result<MultiExchangeTokenDetails, String> {
+    if exchanges.is_empty() {
+        return Err("At least one exchange is required".to_string());
+    }
+
+    log::info!("🔍 Fetching {} from {} exchanges in parallel", 
+        symbol, exchanges.len());
+
+    // Busca paralela em todas as exchanges
+    let mut tasks = Vec::new();
+    
+    for exchange in exchanges {
+        let symbol_owned = symbol.to_string();
+        let exchange_clone = exchange.clone();
+        
+        let task = tokio::spawn(async move {
+            let request = GetTokenDetailsRequest {
+                symbol: symbol_owned.clone(),
+                exchange: DecryptedExchange {
+                    exchange_id: exchange_clone.exchange_id.clone(),
+                    ccxt_id: exchange_clone.ccxt_id.clone(),
+                    name: exchange_clone.name.clone(),
+                    api_key: exchange_clone.api_key.clone(),
+                    api_secret: exchange_clone.api_secret.clone(),
+                    passphrase: exchange_clone.passphrase.clone(),
+                    is_active: true,
+                },
+            };
+            
+            let result = match timeout(
+                Duration::from_secs(15), 
+                get_token_details_with_creds(&request)
+            ).await {
+                Ok(Ok(data)) => ExchangeTokenDetails {
+                    exchange_id: exchange_clone.exchange_id,
+                    exchange_name: exchange_clone.name,
+                    ccxt_id: exchange_clone.ccxt_id,
+                    status: "success".to_string(),
+                    error: None,
+                    data: Some(data),
+                },
+                Ok(Err(e)) => ExchangeTokenDetails {
+                    exchange_id: exchange_clone.exchange_id,
+                    exchange_name: exchange_clone.name,
+                    ccxt_id: exchange_clone.ccxt_id,
+                    status: "error".to_string(),
+                    error: Some(e),
+                    data: None,
+                },
+                Err(_) => ExchangeTokenDetails {
+                    exchange_id: exchange_clone.exchange_id,
+                    exchange_name: exchange_clone.name,
+                    ccxt_id: exchange_clone.ccxt_id,
+                    status: "timeout".to_string(),
+                    error: Some("Request timed out".to_string()),
+                    data: None,
+                },
+            };
+            
+            result
+        });
+        
+        tasks.push(task);
+    }
+    
+    // Aguarda todas as tarefas
+    let mut results = Vec::new();
+    for task in tasks {
+        match task.await {
+            Ok(result) => results.push(result),
+            Err(e) => {
+                log::error!("❌ Task join error: {}", e);
+            }
+        }
+    }
+    
+    // Análise de preços e arbitragem
+    let comparison = calculate_price_comparison(&results);
+    let arbitrage_opportunities = find_arbitrage_opportunities(&results);
+    
+    log::info!("✅ Retrieved {} from {} exchanges ({} successful)", 
+        symbol, 
+        results.len(),
+        results.iter().filter(|r| r.status == "success").count());
+    
+    Ok(MultiExchangeTokenDetails {
+        success: true,
+        symbol: symbol.to_string(),
+        exchanges: results,
+        comparison,
+        arbitrage_opportunities,
+    })
+}
+
+fn calculate_price_comparison(exchanges: &[ExchangeTokenDetails]) -> PriceComparison {
+    let mut best_bid: Option<BestPrice> = None;
+    let mut best_ask: Option<BestPrice> = None;
+    let mut all_bids = Vec::new();
+    let mut all_asks = Vec::new();
+    
+    for exchange in exchanges {
+        if let Some(ref data) = exchange.data {
+            // Parse bid/ask
+            if let Ok(bid_price) = data.price.bid.parse::<f64>() {
+                if bid_price > 0.0 {
+                    all_bids.push(bid_price);
+                    if best_bid.is_none() || bid_price > best_bid.as_ref().unwrap().price {
+                        best_bid = Some(BestPrice {
+                            exchange: exchange.exchange_name.clone(),
+                            price: bid_price,
+                        });
+                    }
+                }
+            }
+            
+            if let Ok(ask_price) = data.price.ask.parse::<f64>() {
+                if ask_price > 0.0 {
+                    all_asks.push(ask_price);
+                    if best_ask.is_none() || ask_price < best_ask.as_ref().unwrap().price {
+                        best_ask = Some(BestPrice {
+                            exchange: exchange.exchange_name.clone(),
+                            price: ask_price,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    
+    // Calcula spread máximo
+    let max_spread_percent = if let (Some(max_bid), Some(min_ask)) = (
+        all_bids.iter().max_by(|a, b| a.partial_cmp(b).unwrap()),
+        all_asks.iter().min_by(|a, b| a.partial_cmp(b).unwrap()),
+    ) {
+        ((max_bid - min_ask) / min_ask * 100.0).abs()
+    } else {
+        0.0
+    };
+    
+    PriceComparison {
+        best_bid,
+        best_ask,
+        max_spread_percent,
+    }
+}
+
+fn find_arbitrage_opportunities(exchanges: &[ExchangeTokenDetails]) -> Vec<ArbitrageOpportunity> {
+    let mut opportunities = Vec::new();
+    
+    // Compara todas as combinações de exchanges
+    for i in 0..exchanges.len() {
+        if exchanges[i].status != "success" || exchanges[i].data.is_none() {
+            continue;
+        }
+        
+        let exchange_i_data = exchanges[i].data.as_ref().unwrap();
+        let ask_i = match exchange_i_data.price.ask.parse::<f64>() {
+            Ok(price) if price > 0.0 => price,
+            _ => continue,
+        };
+        
+        for j in 0..exchanges.len() {
+            if i == j || exchanges[j].status != "success" || exchanges[j].data.is_none() {
+                continue;
+            }
+            
+            let exchange_j_data = exchanges[j].data.as_ref().unwrap();
+            let bid_j = match exchange_j_data.price.bid.parse::<f64>() {
+                Ok(price) if price > 0.0 => price,
+                _ => continue,
+            };
+            
+            // Se o bid de J é maior que o ask de I, há oportunidade
+            if bid_j > ask_i {
+                let profit_percent = ((bid_j - ask_i) / ask_i) * 100.0;
+                
+                // Considera apenas oportunidades > 0.5%
+                if profit_percent > 0.5 {
+                    opportunities.push(ArbitrageOpportunity {
+                        buy_from: exchanges[i].exchange_name.clone(),
+                        sell_to: exchanges[j].exchange_name.clone(),
+                        buy_price: ask_i,
+                        sell_price: bid_j,
+                        profit_percent,
+                    });
+                }
+            }
+        }
+    }
+    
+    // Ordena por maior lucro
+    opportunities.sort_by(|a, b| b.profit_percent.partial_cmp(&a.profit_percent).unwrap());
+    
+    opportunities
+}
+

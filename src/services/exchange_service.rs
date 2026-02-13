@@ -92,7 +92,7 @@ pub async fn get_token_details(
     exchange_id: &str,
     symbol: &str,
 ) -> Result<serde_json::Value, String> {
-    use crate::models::user_exchange::{UserExchanges, UserExchangeItem};
+    use crate::models::user_exchange::UserExchanges;
     use crate::models::ExchangeCatalog;
     use crate::utils::crypto::decrypt_fernet_via_python;
     use crate::utils::thread_pool::spawn_ccxt_blocking;

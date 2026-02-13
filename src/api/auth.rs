@@ -2,7 +2,6 @@ use actix_web::{web, HttpResponse, HttpRequest};
 use crate::{database::MongoDB, services::auth_service};
 use crate::services::auth_service::{LoginRequest, RegisterRequest, AuthResponse, UserInfo};
 use base64::Engine;
-use utoipa::OpenApi;
 
 #[utoipa::path(
     post,

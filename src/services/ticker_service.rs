@@ -4,7 +4,6 @@ use crate::{
     models::{DecryptedExchange, UserExchanges, ExchangeCatalog},
     utils::crypto::decrypt_fernet_via_python,
 };
-use futures::future::join_all;
 use mongodb::bson::{doc, oid::ObjectId};
 use serde::{Deserialize, Serialize};
 use std::env;

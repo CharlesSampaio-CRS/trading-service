@@ -65,14 +65,26 @@ impl CCXTClient {
     }
     
     /// Fetch all ticker prices from exchange in a single optimized call
+    /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
     pub fn fetch_tickers_sync(&self) -> Result<HashMap<String, f64>, String> {
         Python::with_gil(|py| {
             log::debug!("🔍 Fetching tickers from {}...", self.exchange_name);
             
-            // Call exchange.fetch_tickers()
+            // 🔥 Adiciona timestamp para forçar bypass de cache
+            let params_dict = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params_dict.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp param: {}", e))?;
+            
+            log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {} (NO CACHE)", self.exchange_name, timestamp);
+            
+            // Call exchange.fetch_tickers() with timestamp
             let tickers_obj = self.exchange
                 .as_ref(py)
-                .call_method0("fetch_tickers")
+                .call_method1("fetch_tickers", (params_dict,))
                 .map_err(|e| format!("Failed to fetch tickers: {}", e))?;
             
             let mut prices = HashMap::new();
@@ -150,18 +162,29 @@ impl CCXTClient {
             log::debug!("✅ [{}] Balance fetched from CCXT (no cache)", exchange_name);
             
             // 2. Fetch tickers (prices AND change_24h) - non-blocking if fails
-            // 🔥 IMPORTANTE: Não passa parâmetros para fetch_tickers para evitar erro do CCXT
-            // O fetch_balance já força cache bypass, tickers pode usar comportamento padrão
-            let (tickers, changes) = match exchange.as_ref(py).call_method0("fetch_tickers") {
-                Ok(tickers_obj) => {
-                    let mut prices = HashMap::new();
-                    let mut percent_changes = HashMap::new();
-                    
-                    // Verifica se tickers_obj não é None
-                    if tickers_obj.is_none() {
-                        log::warn!("⚠️  fetch_tickers returned None for {}", exchange_name);
-                        (HashMap::new(), HashMap::new())
-                    } else if let Ok(tickers_dict) = tickers_obj.downcast::<PyDict>() {
+            // 🔥 REAL-TIME: Adiciona timestamp para garantir bypass de cache
+            let (tickers, changes) = {
+                // Cria parâmetros com timestamp
+                let params_dict = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                if let Err(e) = params_dict.set_item("_t", timestamp) {
+                    log::warn!("⚠️  Could not set timestamp for {}: {}", exchange_name, e);
+                }
+                
+                log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {} (NO CACHE)", exchange_name, timestamp);
+                
+                match exchange.as_ref(py).call_method1("fetch_tickers", (params_dict,)) {
+                    Ok(tickers_obj) => {
+                        let mut prices = HashMap::new();
+                        let mut percent_changes = HashMap::new();
+                        
+                        // Verifica se tickers_obj não é None
+                        if tickers_obj.is_none() {
+                            log::warn!("⚠️  fetch_tickers returned None for {}", exchange_name);
+                        } else if let Ok(tickers_dict) = tickers_obj.downcast::<PyDict>() {
                         for (symbol_obj, ticker_obj) in tickers_dict.iter() {
                             // Verifica se symbol não é None antes de extrair
                             if symbol_obj.is_none() {
@@ -219,15 +242,16 @@ impl CCXTClient {
                         }
                         log::info!("✅ Fetched {} ticker prices (USDT pairs) and {} changes from {}", 
                             prices.len(), percent_changes.len(), exchange_name);
+                        } else {
+                            log::warn!("⚠️  Could not downcast tickers to PyDict for {}", exchange_name);
+                        }
+                        
                         (prices, percent_changes)
-                    } else {
-                        log::warn!("⚠️  Could not downcast tickers to PyDict for {}", exchange_name);
+                    }
+                    Err(e) => {
+                        log::warn!("⚠️  Could not fetch tickers from {}: {}", exchange_name, e);
                         (HashMap::new(), HashMap::new())
                     }
-                }
-                Err(e) => {
-                    log::warn!("⚠️  Could not fetch tickers from {}: {}", exchange_name, e);
-                    (HashMap::new(), HashMap::new())
                 }
             };
             
@@ -382,9 +406,18 @@ impl CCXTClient {
     
     pub fn fetch_order_sync(&self, order_id: &str, symbol: &str) -> Result<PyObject, String> {
         Python::with_gil(|py| {
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let order = self.exchange
                 .as_ref(py)
-                .call_method1("fetch_order", (order_id, symbol))
+                .call_method("fetch_order", (order_id, symbol), Some(params))
                 .map_err(|e| format!("Failed to fetch order: {}", e))?;
             
             Ok(order.into())
@@ -399,9 +432,18 @@ impl CCXTClient {
                 _ => "fetch_orders",
             };
             
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let orders = self.exchange
                 .as_ref(py)
-                .call_method0(method)
+                .call_method(method, (), Some(params))
                 .map_err(|e| format!("Failed to fetch orders: {}", e))?;
             
             let mut result = Vec::new();
@@ -443,10 +485,19 @@ impl CCXTClient {
     
     pub async fn fetch_ticker(&self, symbol: &str) -> Result<HashMap<String, f64>, String> {
         Python::with_gil(|py| {
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let ticker = self
                 .exchange
                 .as_ref(py)
-                .call_method1("fetch_ticker", (symbol,))
+                .call_method("fetch_ticker", (symbol,), Some(params))
                 .map_err(|e| format!("Failed to fetch ticker: {}", e))?;
             
             let mut result = HashMap::new();
@@ -493,9 +544,18 @@ impl CCXTClient {
     
     pub fn fetch_positions_sync(&self) -> Result<Vec<PyObject>, String> {
         Python::with_gil(|py| {
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let positions = self.exchange
                 .as_ref(py)
-                .call_method0("fetch_positions")
+                .call_method("fetch_positions", (), Some(params))
                 .map_err(|e| format!("Failed to fetch positions: {}", e))?;
             
             let mut result = Vec::new();
@@ -512,9 +572,18 @@ impl CCXTClient {
     
     pub fn fetch_markets_sync(&self) -> Result<Vec<PyObject>, String> {
         Python::with_gil(|py| {
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let markets = self.exchange
                 .as_ref(py)
-                .call_method0("fetch_markets")
+                .call_method("fetch_markets", (), Some(params))
                 .map_err(|e| format!("Failed to fetch markets: {}", e))?;
             
             let mut result = Vec::new();
@@ -530,11 +599,21 @@ impl CCXTClient {
     }
     
     /// Fetch raw balance from exchange (for MEXC special handling)
+    /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
     pub fn fetch_balance_raw(&self) -> Result<PyObject, String> {
         Python::with_gil(|py| {
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let balance = self.exchange
                 .as_ref(py)
-                .call_method0("fetch_balance")
+                .call_method("fetch_balance", (), Some(params))
                 .map_err(|e| format!("Failed to fetch balance: {}", e))?;
             
             Ok(balance.into())
@@ -542,11 +621,21 @@ impl CCXTClient {
     }
     
     /// Fetch open orders for a specific symbol (used for MEXC)
+    /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
     pub fn fetch_open_orders_with_symbol(&self, symbol: &str) -> Result<Vec<PyObject>, String> {
         Python::with_gil(|py| {
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let orders = self.exchange
                 .as_ref(py)
-                .call_method1("fetch_open_orders", (symbol,))
+                .call_method("fetch_open_orders", (symbol,), Some(params))
                 .map_err(|e| format!("Failed to fetch open orders for {}: {}", symbol, e))?;
             
             let mut result = Vec::new();
@@ -574,11 +663,21 @@ impl CCXTClient {
     }
     
     /// Search market symbols by query string
+    /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
     pub fn search_markets_symbols_sync(&self, query: &str, limit: usize) -> Result<Vec<String>, String> {
         Python::with_gil(|py| {
+            // 🔥 Adiciona timestamp para bypass de cache
+            let params = pyo3::types::PyDict::new(py);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            params.set_item("_t", timestamp)
+                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            
             let markets = self.exchange
                 .as_ref(py)
-                .call_method0("fetch_markets")
+                .call_method("fetch_markets", (), Some(params))
                 .map_err(|e| format!("Failed to fetch markets: {}", e))?;
 
             let query_upper = query.trim().to_uppercase();

@@ -7,7 +7,6 @@ pub mod token_service;
 pub mod coingecko_service;
 pub mod exchange_rate_service;
 
-pub use auth_service::*;
 pub use balance_service::*;
 pub use order_service::*;
 pub use exchange_service::*;

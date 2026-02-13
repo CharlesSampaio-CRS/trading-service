@@ -60,29 +60,113 @@ scp -i "$KEY_FILE" -o StrictHostKeyChecking=no "$DEPLOY_DIR/app.tar.gz" ubuntu@"
 
 # 3. Build e deploy no servidor
 echo "🔧 Compilando e configurando no servidor..."
+echo ""
 ssh -i "$KEY_FILE" -o StrictHostKeyChecking=no ubuntu@"$SERVER_IP" << 'ENDSSH'
     set -e
     
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📦 Extraindo aplicação..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     mkdir -p ~/trading-service/data
     cd ~/trading-service
     tar -xzf ~/app.tar.gz
     rm ~/app.tar.gz
+    echo "✓ Aplicação extraída"
+    echo ""
     
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "💾 Configurando SWAP temporário (para compilação)..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     if [ ! -f /swapfile ]; then
-        sudo fallocate -l 2G /swapfile
+        echo "Criando SWAP de 4GB (necessário para compilação Rust)..."
+        sudo fallocate -l 4G /swapfile
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
-        echo "✓ SWAP de 2GB ativado"
+        echo "✓ SWAP de 4GB ativado"
+    else
+        # Garantir que SWAP está ativo
+        sudo swapon /swapfile 2>/dev/null || true
+        echo "✓ SWAP já configurado e ativo"
     fi
     
-    echo "🦀 Compilando aplicação (pode demorar 5-10 min)..."
-    export PATH="$HOME/.cargo/bin:$PATH"
-    cargo build --release
+    # Mostrar uso de swap
+    echo "   SWAP disponível: $(free -h | awk '/^Swap:/ {print $2}')"
+    echo ""
     
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🛑 Parando serviço anterior (se existir)..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if sudo systemctl is-active --quiet trading-service; then
+        echo "⏹️  Serviço está rodando, parando..."
+        sudo systemctl stop trading-service
+        echo "✓ Serviço parado"
+        sleep 2
+    else
+        echo "✓ Nenhum serviço anterior rodando"
+    fi
+    
+    # Matar processos cargo/rustc que possam estar travados
+    if pgrep -f "cargo|rustc" > /dev/null; then
+        echo "⚠️  Encontrados processos de compilação travados, matando..."
+        pkill -9 -f "cargo|rustc" || true
+        sleep 1
+        echo "✓ Processos limpos"
+    fi
+    
+    # Verificar recursos disponíveis
+    echo "📊 Recursos do sistema:"
+    echo "   Memória livre: $(free -h | awk '/^Mem:/ {print $7}')"
+    echo "   SWAP em uso: $(free -h | awk '/^Swap:/ {print $3}')"
+    echo "   Espaço em disco: $(df -h ~ | awk 'NR==2 {print $4}')"
+    echo ""
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🧹 Limpando cache de compilação anterior..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    cargo clean || true
+    echo "✓ Cache limpo"
+    echo ""
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🦀 Compilando aplicação Rust..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "⏱️  Isso pode demorar 10-15 minutos na primeira vez"
+    echo "🔧 Compilando com -j 1 (sequencial) para economizar memória"
+    echo "📊 Progresso da compilação:"
+    echo ""
+    export PATH="$HOME/.cargo/bin:$PATH"
+    
+    # Compilar sequencialmente para não travar por falta de memória
+    # -j 1 força compilação de 1 crate por vez
+    if timeout 1800 cargo build --release -j 1 2>&1 | grep -E "(Compiling|Finished|error:)" | while read line; do 
+        echo "   $line"
+        # Mostrar uso de memória a cada 10 pacotes
+        if [[ "$line" == *"Compiling"* ]] && (( RANDOM % 10 == 0 )); then
+            echo "      [Mem: $(free -h | awk '/^Mem:/ {print $3}') / SWAP: $(free -h | awk '/^Swap:/ {print $3}')]"
+        fi
+    done; then
+        echo ""
+        echo "✓ Compilação concluída com sucesso!"
+    else
+        EXIT_CODE=$?
+        echo ""
+        if [ $EXIT_CODE -eq 124 ]; then
+            echo "❌ Timeout: Compilação demorou mais de 30 minutos!"
+            echo "   A instância pode estar sem recursos."
+            echo "   Considere usar uma instância maior temporariamente."
+        else
+            echo "❌ Erro na compilação!"
+            echo "Mostrando últimas linhas do erro..."
+            cargo build --release -j 1 2>&1 | tail -50
+        fi
+        exit 1
+    fi
+    echo ""
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📝 Criando serviço systemd..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     sudo tee /etc/systemd/system/trading-service.service > /dev/null <<EOF
 [Unit]
 Description=Trading Service
@@ -101,15 +185,40 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+    echo "✓ Serviço systemd criado"
+    echo ""
 
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "🚀 Iniciando serviço..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     sudo systemctl daemon-reload
+    echo "✓ Systemd recarregado"
+    
     sudo systemctl enable trading-service
+    echo "✓ Serviço habilitado para iniciar no boot"
+    
     sudo systemctl restart trading-service
+    echo "✓ Serviço reiniciado"
+    echo ""
     
-    echo "⏳ Aguardando inicialização..."
-    sleep 5
+    echo "⏳ Aguardando inicialização (5s)..."
+    for i in {5..1}; do
+        echo -n "   $i... "
+        sleep 1
+    done
+    echo ""
+    echo ""
     
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🔍 Status do serviço:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    sudo systemctl status trading-service --no-pager -l || true
+    echo ""
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📋 Últimas 10 linhas do log:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    sudo journalctl -u trading-service -n 10 --no-━━━━━━━━━━━━━━━━━━━━━
     echo "🔍 Status do serviço:"
     sudo systemctl status trading-service --no-pager || true
     

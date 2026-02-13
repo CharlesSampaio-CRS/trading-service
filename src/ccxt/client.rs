@@ -65,27 +65,39 @@ impl CCXTClient {
     }
     
     /// Fetch all ticker prices from exchange in a single optimized call
-    /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
+    /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache (exceto exchanges restritivas)
     pub fn fetch_tickers_sync(&self) -> Result<HashMap<String, f64>, String> {
         Python::with_gil(|py| {
             log::debug!("🔍 Fetching tickers from {}...", self.exchange_name);
             
-            // 🔥 Adiciona timestamp para forçar bypass de cache
-            let params_dict = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params_dict.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp param: {}", e))?;
+            // ⚠️ Algumas exchanges (Binance, MEXC) não aceitam parâmetros personalizados
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {} (NO CACHE)", self.exchange_name, timestamp);
-            
-            // Call exchange.fetch_tickers() with timestamp
-            let tickers_obj = self.exchange
-                .as_ref(py)
-                .call_method1("fetch_tickers", (params_dict,))
-                .map_err(|e| format!("Failed to fetch tickers: {}", e))?;
+            let tickers_obj = if is_restrictive {
+                // Exchanges restritivas: SEM parâmetros
+                log::debug!("🔧 [{}] Calling fetch_tickers WITHOUT params (restrictive exchange)", self.exchange_name);
+                self.exchange
+                    .as_ref(py)
+                    .call_method0("fetch_tickers")
+                    .map_err(|e| format!("Failed to fetch tickers: {}", e))?
+            } else {
+                // Outras exchanges: COM timestamp para bypass de cache
+                let params_dict = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params_dict.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp param: {}", e))?;
+                
+                log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {} (NO CACHE)", self.exchange_name, timestamp);
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method1("fetch_tickers", (params_dict,))
+                    .map_err(|e| format!("Failed to fetch tickers: {}", e))?
+            };
             
             let mut prices = HashMap::new();
             
@@ -133,11 +145,14 @@ impl CCXTClient {
             log::info!("🔍 [{}] Fetching fresh balance from CCXT (NO CACHE)...", exchange_name);
             
             // 1. Fetch balance 
-            // ⚠️ IMPORTANTE: Binance NÃO aceita parâmetros extras!
+            // ⚠️ IMPORTANTE: Binance e MEXC NÃO aceitam parâmetros extras!
             // Outras exchanges aceitam timestamp para bypass de cache
-            let balance_dict = if exchange_name.to_lowercase() == "binance" {
-                // Binance: SEM parâmetros (muito restritiva)
-                log::debug!("🔧 [Binance] Chamando fetch_balance SEM parâmetros (exchange restritiva)");
+            let exchange_lower = exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            
+            let balance_dict = if is_restrictive {
+                // Binance/MEXC: SEM parâmetros (exchanges restritivas)
+                log::debug!("🔧 [{}] Chamando fetch_balance SEM parâmetros (exchange restritiva)", exchange_name);
                 exchange
                     .as_ref(py)
                     .call_method0("fetch_balance")
@@ -162,21 +177,32 @@ impl CCXTClient {
             log::debug!("✅ [{}] Balance fetched from CCXT (no cache)", exchange_name);
             
             // 2. Fetch tickers (prices AND change_24h) - non-blocking if fails
-            // 🔥 REAL-TIME: Adiciona timestamp para garantir bypass de cache
+            // 🔥 REAL-TIME: Adiciona timestamp para garantir bypass de cache (exceto exchanges restritivas)
             let (tickers, changes) = {
-                // Cria parâmetros com timestamp
-                let params_dict = pyo3::types::PyDict::new(py);
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                if let Err(e) = params_dict.set_item("_t", timestamp) {
-                    log::warn!("⚠️  Could not set timestamp for {}: {}", exchange_name, e);
-                }
+                // ⚠️ Algumas exchanges (Binance, MEXC) não aceitam parâmetros personalizados
+                let exchange_lower = exchange_name.to_lowercase();
+                let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
                 
-                log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {} (NO CACHE)", exchange_name, timestamp);
+                let tickers_result = if is_restrictive {
+                    // Exchanges restritivas: SEM parâmetros
+                    log::debug!("🔧 [{}] Calling fetch_tickers WITHOUT params (restrictive exchange)", exchange_name);
+                    exchange.as_ref(py).call_method0("fetch_tickers")
+                } else {
+                    // Outras exchanges: COM timestamp para bypass de cache
+                    let params_dict = pyo3::types::PyDict::new(py);
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis();
+                    if let Err(e) = params_dict.set_item("_t", timestamp) {
+                        log::warn!("⚠️  Could not set timestamp for {}: {}", exchange_name, e);
+                    }
+                    
+                    log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {} (NO CACHE)", exchange_name, timestamp);
+                    exchange.as_ref(py).call_method1("fetch_tickers", (params_dict,))
+                };
                 
-                match exchange.as_ref(py).call_method1("fetch_tickers", (params_dict,)) {
+                match tickers_result {
                     Ok(tickers_obj) => {
                         let mut prices = HashMap::new();
                         let mut percent_changes = HashMap::new();
@@ -406,19 +432,31 @@ impl CCXTClient {
     
     pub fn fetch_order_sync(&self, order_id: &str, symbol: &str) -> Result<PyObject, String> {
         Python::with_gil(|py| {
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let order = self.exchange
-                .as_ref(py)
-                .call_method("fetch_order", (order_id, symbol), Some(params))
-                .map_err(|e| format!("Failed to fetch order: {}", e))?;
+            let order = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_order", (order_id, symbol), None)
+                    .map_err(|e| format!("Failed to fetch order: {}", e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_order", (order_id, symbol), Some(params))
+                    .map_err(|e| format!("Failed to fetch order: {}", e))?
+            };
             
             Ok(order.into())
         })
@@ -432,19 +470,31 @@ impl CCXTClient {
                 _ => "fetch_orders",
             };
             
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let orders = self.exchange
-                .as_ref(py)
-                .call_method(method, (), Some(params))
-                .map_err(|e| format!("Failed to fetch orders: {}", e))?;
+            let orders = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method(method, (), None)
+                    .map_err(|e| format!("Failed to fetch orders: {}", e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method(method, (), Some(params))
+                    .map_err(|e| format!("Failed to fetch orders: {}", e))?
+            };
             
             let mut result = Vec::new();
             
@@ -485,20 +535,31 @@ impl CCXTClient {
     
     pub async fn fetch_ticker(&self, symbol: &str) -> Result<HashMap<String, f64>, String> {
         Python::with_gil(|py| {
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let ticker = self
-                .exchange
-                .as_ref(py)
-                .call_method("fetch_ticker", (symbol,), Some(params))
-                .map_err(|e| format!("Failed to fetch ticker: {}", e))?;
+            let ticker = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_ticker", (symbol,), None)
+                    .map_err(|e| format!("Failed to fetch ticker: {}", e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_ticker", (symbol,), Some(params))
+                    .map_err(|e| format!("Failed to fetch ticker: {}", e))?
+            };
             
             let mut result = HashMap::new();
             
@@ -544,19 +605,31 @@ impl CCXTClient {
     
     pub fn fetch_positions_sync(&self) -> Result<Vec<PyObject>, String> {
         Python::with_gil(|py| {
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let positions = self.exchange
-                .as_ref(py)
-                .call_method("fetch_positions", (), Some(params))
-                .map_err(|e| format!("Failed to fetch positions: {}", e))?;
+            let positions = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_positions", (), None)
+                    .map_err(|e| format!("Failed to fetch positions: {}", e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_positions", (), Some(params))
+                    .map_err(|e| format!("Failed to fetch positions: {}", e))?
+            };
             
             let mut result = Vec::new();
             
@@ -572,19 +645,31 @@ impl CCXTClient {
     
     pub fn fetch_markets_sync(&self) -> Result<Vec<PyObject>, String> {
         Python::with_gil(|py| {
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let markets = self.exchange
-                .as_ref(py)
-                .call_method("fetch_markets", (), Some(params))
-                .map_err(|e| format!("Failed to fetch markets: {}", e))?;
+            let markets = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), None)
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), Some(params))
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            };
             
             let mut result = Vec::new();
             
@@ -602,19 +687,31 @@ impl CCXTClient {
     /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
     pub fn fetch_balance_raw(&self) -> Result<PyObject, String> {
         Python::with_gil(|py| {
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let balance = self.exchange
-                .as_ref(py)
-                .call_method("fetch_balance", (), Some(params))
-                .map_err(|e| format!("Failed to fetch balance: {}", e))?;
+            let balance = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_balance", (), None)
+                    .map_err(|e| format!("Failed to fetch balance: {}", e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_balance", (), Some(params))
+                    .map_err(|e| format!("Failed to fetch balance: {}", e))?
+            };
             
             Ok(balance.into())
         })
@@ -624,19 +721,31 @@ impl CCXTClient {
     /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
     pub fn fetch_open_orders_with_symbol(&self, symbol: &str) -> Result<Vec<PyObject>, String> {
         Python::with_gil(|py| {
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let orders = self.exchange
-                .as_ref(py)
-                .call_method("fetch_open_orders", (symbol,), Some(params))
-                .map_err(|e| format!("Failed to fetch open orders for {}: {}", symbol, e))?;
+            let orders = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_open_orders", (symbol,), None)
+                    .map_err(|e| format!("Failed to fetch open orders for {}: {}", symbol, e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_open_orders", (symbol,), Some(params))
+                    .map_err(|e| format!("Failed to fetch open orders for {}: {}", symbol, e))?
+            };
             
             let mut result = Vec::new();
             
@@ -666,19 +775,31 @@ impl CCXTClient {
     /// 🔥 REAL-TIME: Usa timestamp para garantir bypass de cache
     pub fn search_markets_symbols_sync(&self, query: &str, limit: usize) -> Result<Vec<String>, String> {
         Python::with_gil(|py| {
-            // 🔥 Adiciona timestamp para bypass de cache
-            let params = pyo3::types::PyDict::new(py);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-            params.set_item("_t", timestamp)
-                .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
             
-            let markets = self.exchange
-                .as_ref(py)
-                .call_method("fetch_markets", (), Some(params))
-                .map_err(|e| format!("Failed to fetch markets: {}", e))?;
+            let markets = if is_restrictive {
+                // Sem parâmetros para exchanges restritivas
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), None)
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            } else {
+                // 🔥 Adiciona timestamp para bypass de cache
+                let params = pyo3::types::PyDict::new(py);
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis();
+                params.set_item("_t", timestamp)
+                    .map_err(|e| format!("Failed to set timestamp: {}", e))?;
+                
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), Some(params))
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            };
 
             let query_upper = query.trim().to_uppercase();
             if query_upper.is_empty() {

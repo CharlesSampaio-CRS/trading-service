@@ -145,6 +145,7 @@ async fn main() -> std::io::Result<()> {
             // User Exchanges: Manage connected exchanges (CRUD) - Requires JWT
             .service(
                 web::scope("/api/v1/user/exchanges")
+                    .wrap(middleware::auth::AuthMiddleware)
                     .route("", web::post().to(api::user_exchanges::add_exchange))
                     .route("", web::get().to(api::user_exchanges::list_exchanges))
                     .route("/{exchange_id}", web::patch().to(api::user_exchanges::update_exchange))
@@ -154,22 +155,32 @@ async fn main() -> std::io::Result<()> {
             // Balances: Real-time from exchanges via CCXT
             .service(
                 web::scope("/api/v1/balances")
-                    // Endpoint unificado: GET (MongoDB) ou POST (credenciais do frontend)
+                    // Public endpoints (no JWT required)
                     .route("", web::get().to(api::balances::get_balances))
                     .route("", web::post().to(api::balances::post_balances))
-                    .route("/secure", web::post().to(api::balances::post_balances_secure)) // ✅ NEW: Secure version using JWT
                     .route("/summary", web::get().to(api::balances::get_balance_summary))
                     .route("/exchange/{id}", web::get().to(api::balances::get_exchange_balance))
                     .route("/market-movers", web::get().to(api::balances::get_market_movers))
+                    // Protected endpoint requiring JWT authentication
+                    .service(
+                        web::resource("/secure")
+                            .wrap(middleware::auth::AuthMiddleware)
+                            .route(web::post().to(api::balances::post_balances_secure))
+                    )
             )
             
             // Orders: Create/Cancel on exchanges via CCXT (Zero Database Architecture)
             .service(
                 web::scope("/api/v1/orders")
                     .route("/fetch", web::post().to(api::orders::fetch_orders_from_credentials)) // ✅ Buscar orders com creds do frontend
-                    .route("/fetch/secure", web::post().to(api::orders::fetch_orders_secure)) // ✅ NEW: Secure version using JWT
                     .route("/create-with-creds", web::post().to(api::orders::create_order_with_creds)) // ✅ Criar com creds do frontend
                     .route("/cancel-with-creds", web::post().to(api::orders::cancel_order_with_creds)) // ✅ Cancelar com creds do frontend
+                    // Protected endpoint requiring JWT authentication
+                    .service(
+                        web::resource("/fetch/secure")
+                            .wrap(middleware::auth::AuthMiddleware)
+                            .route(web::post().to(api::orders::fetch_orders_secure))
+                    )
             )
             
             // Tickers: Real-time prices via CCXT

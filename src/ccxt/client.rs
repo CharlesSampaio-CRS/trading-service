@@ -435,9 +435,13 @@ impl CCXTClient {
     
     pub fn fetch_order_sync(&self, order_id: &str, symbol: &str) -> Result<PyObject, String> {
         Python::with_gil(|py| {
-            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            // ⚠️ Exchanges restritivas (Binance, MEXC, OKX, Bybit, Kraken) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
+            let is_restrictive = exchange_lower == "binance" 
+                || exchange_lower == "mexc" 
+                || exchange_lower == "okx"
+                || exchange_lower == "bybit"
+                || exchange_lower == "kraken";
             
             let order = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -473,12 +477,17 @@ impl CCXTClient {
                 _ => "fetch_orders",
             };
             
-            // ⚠️ Exchanges restritivas (Binance, MEXC, OKX) não aceitam parâmetros extras
+            // ⚠️ Exchanges restritivas (Binance, MEXC, OKX, Bybit, Kraken) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
+            let is_restrictive = exchange_lower == "binance" 
+                || exchange_lower == "mexc" 
+                || exchange_lower == "okx"
+                || exchange_lower == "bybit"
+                || exchange_lower == "kraken";
             
             let orders = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
+                log::debug!("🔧 [{}] Calling {} WITHOUT params (restrictive exchange)", self.exchange_name, method);
                 self.exchange
                     .as_ref(py)
                     .call_method(method, (), None)
@@ -493,6 +502,7 @@ impl CCXTClient {
                 params.set_item("_t", timestamp)
                     .map_err(|e| format!("Failed to set timestamp: {}", e))?;
                 
+                log::debug!("🔧 [{}] Calling {} WITH timestamp: {}", self.exchange_name, method, timestamp);
                 self.exchange
                     .as_ref(py)
                     .call_method(method, (), Some(params))

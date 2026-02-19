@@ -521,8 +521,8 @@ pub struct MarketMoversResponse {
 }
 
 pub async fn get_market_movers(
-    db: &MongoDB,
-    user_id: &str,
+    _db: &MongoDB,
+    _user_id: &str,
 ) -> Result<MarketMoversResponse, String> {
     // Simplified implementation - would need ticker data
     Ok(MarketMoversResponse {

@@ -6,6 +6,8 @@ use crate::{
         DecryptedExchange,
         CreateOrderWithCredsRequest, CancelOrderWithCredsRequest,
     },
+    middleware::auth::Claims,
+    database::MongoDB,
 };
 
 // ==================== ZERO DATABASE ARCHITECTURE ====================
@@ -53,6 +55,55 @@ pub async fn fetch_orders_from_credentials(
             "success": false,
             "error": e
         }))
+    }
+}
+
+/// POST /api/v1/orders/fetch/secure - ✅ SECURE VERSION - Fetch orders from MongoDB using JWT
+/// Body is EMPTY - user identification comes from JWT token
+pub async fn fetch_orders_secure(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    
+    log::info!("🔐 POST /orders/fetch/secure - user {} (from JWT)", user_id);
+    
+    // Buscar exchanges do MongoDB (já descriptografadas)
+    match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exchanges) => {
+            if exchanges.is_empty() {
+                log::warn!("⚠️ No exchanges found for user {}", user_id);
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "success": true,
+                    "orders": [],
+                    "total_count": 0
+                }));
+            }
+            
+            log::info!("📊 Fetching orders from {} exchanges", exchanges.len());
+            
+            // Chamar serviço de orders
+            match order_service::fetch_orders_from_exchanges(exchanges).await {
+                Ok(response) => {
+                    log::info!("✅ Orders fetched: {} total", response.orders.len());
+                    HttpResponse::Ok().json(response)
+                }
+                Err(e) => {
+                    log::error!("❌ Error fetching orders: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false,
+                        "error": e
+                    }))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("❌ Error fetching user exchanges: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
     }
 }
 

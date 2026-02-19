@@ -6,12 +6,8 @@ use futures::future::LocalBoxFuture;
 use std::future::{ready, Ready};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Claims {
-    pub sub: String,
-    pub exp: usize,
-    pub user_id: String,
-}
+// Re-export Claims from auth_service to keep consistency
+pub use crate::services::auth_service::Claims;
 
 pub struct AuthMiddleware;
 
@@ -69,15 +65,25 @@ where
                     if header_str.starts_with("Bearer ") {
                         let token = &header_str[7..];
                         
-                        // Simplified: Extract user_id from token
-                        // TODO: Implement proper JWT verification with public key
-                        req.extensions_mut().insert(token.to_string());
-                        
-                        let fut = self.service.call(req);
-                        return Box::pin(async move {
-                            let res = fut.await?;
-                            Ok(res)
-                        });
+                        // Verify and decode JWT token
+                        match crate::services::auth_service::verify_token(token) {
+                            Ok(claims) => {
+                                // Insert Claims into request extensions so handlers can access it
+                                req.extensions_mut().insert(claims);
+                                
+                                let fut = self.service.call(req);
+                                return Box::pin(async move {
+                                    let res = fut.await?;
+                                    Ok(res)
+                                });
+                            }
+                            Err(e) => {
+                                log::warn!("🔒 Invalid JWT token: {}", e);
+                                return Box::pin(async move {
+                                    Err(actix_web::error::ErrorUnauthorized(format!("Invalid token: {}", e)))
+                                });
+                            }
+                        }
                     }
                 }
                 

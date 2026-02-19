@@ -70,9 +70,9 @@ impl CCXTClient {
         Python::with_gil(|py| {
             log::debug!("🔍 Fetching tickers from {}...", self.exchange_name);
             
-            // ⚠️ Algumas exchanges (Binance, MEXC) não aceitam parâmetros personalizados
+            // ⚠️ Algumas exchanges (Binance, MEXC, OKX) não aceitam parâmetros personalizados
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
             
             let tickers_obj = if is_restrictive {
                 // Exchanges restritivas: SEM parâmetros
@@ -145,10 +145,10 @@ impl CCXTClient {
             log::info!("🔍 [{}] Fetching fresh balance from CCXT (NO CACHE)...", exchange_name);
             
             // 1. Fetch balance 
-            // ⚠️ IMPORTANTE: Binance e MEXC NÃO aceitam parâmetros extras!
+            // ⚠️ IMPORTANTE: Binance, MEXC e OKX NÃO aceitam parâmetros extras!
             // Outras exchanges aceitam timestamp para bypass de cache
             let exchange_lower = exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
             
             let balance_dict = if is_restrictive {
                 // Binance/MEXC: SEM parâmetros (exchanges restritivas)
@@ -179,9 +179,9 @@ impl CCXTClient {
             // 2. Fetch tickers (prices AND change_24h) - non-blocking if fails
             // 🔥 REAL-TIME: Adiciona timestamp para garantir bypass de cache (exceto exchanges restritivas)
             let (tickers, changes) = {
-                // ⚠️ Algumas exchanges (Binance, MEXC) não aceitam parâmetros personalizados
+                // ⚠️ Algumas exchanges (Binance, MEXC, OKX) não aceitam parâmetros personalizados
                 let exchange_lower = exchange_name.to_lowercase();
-                let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+                let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
                 
                 let tickers_result = if is_restrictive {
                     // Exchanges restritivas: SEM parâmetros
@@ -235,10 +235,11 @@ impl CCXTClient {
                                             if price > 0.0 {  // Ignora preços zero ou negativos
                                                 if let Some(base) = symbol_str.split('/').next() {
                                                     // 🔍 Busca preço em USDT para tokens que não sejam stablecoins
-                                                    // Prioriza pares com USDT, depois USDC, depois USD
+                                                    // Prioriza pares com USDT, depois USDC, USD e BRL
                                                     if symbol_str.ends_with("/USDT") || 
                                                        symbol_str.ends_with("/USDC") || 
-                                                       symbol_str.ends_with("/USD") {
+                                                       symbol_str.ends_with("/USD") ||
+                                                       symbol_str.ends_with("/BRL") {
                                                         // Sobrescreve apenas se ainda não tiver preço ou se for mais específico
                                                         if !prices.contains_key(base) || symbol_str.ends_with("/USDT") {
                                                             prices.insert(base.to_string(), price);
@@ -255,7 +256,8 @@ impl CCXTClient {
                                             if let Some(base) = symbol_str.split('/').next() {
                                                 if symbol_str.ends_with("/USDT") || 
                                                    symbol_str.ends_with("/USDC") || 
-                                                   symbol_str.ends_with("/USD") {
+                                                   symbol_str.ends_with("/USD") ||
+                                                   symbol_str.ends_with("/BRL") {
                                                     if !percent_changes.contains_key(base) || symbol_str.ends_with("/USDT") {
                                                         percent_changes.insert(base.to_string(), change);
                                                     }
@@ -322,8 +324,9 @@ impl CCXTClient {
                             || symbol == "DAI" 
                             || symbol == "BUSD"
                             || symbol == "FDUSD"
+                            || symbol == "USD"
                         {
-                            // Stablecoins = $1.00
+                            // Stablecoins e USD = $1.00
                             Some(1.0)
                         } else if let Some(&price) = tickers.get(&symbol) {
                             // Use ticker price
@@ -434,7 +437,7 @@ impl CCXTClient {
         Python::with_gil(|py| {
             // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
             
             let order = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -470,9 +473,9 @@ impl CCXTClient {
                 _ => "fetch_orders",
             };
             
-            // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
+            // ⚠️ Exchanges restritivas (Binance, MEXC, OKX) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
             
             let orders = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -537,7 +540,7 @@ impl CCXTClient {
         Python::with_gil(|py| {
             // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
             
             let ticker = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -607,7 +610,7 @@ impl CCXTClient {
         Python::with_gil(|py| {
             // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
             
             let positions = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -647,7 +650,7 @@ impl CCXTClient {
         Python::with_gil(|py| {
             // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
             
             let markets = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -689,7 +692,7 @@ impl CCXTClient {
         Python::with_gil(|py| {
             // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
             
             let balance = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -723,7 +726,7 @@ impl CCXTClient {
         Python::with_gil(|py| {
             // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
             
             let orders = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas
@@ -777,7 +780,7 @@ impl CCXTClient {
         Python::with_gil(|py| {
             // ⚠️ Exchanges restritivas (Binance, MEXC) não aceitam parâmetros extras
             let exchange_lower = self.exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc";
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
             
             let markets = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas

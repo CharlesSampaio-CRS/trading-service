@@ -10,5 +10,6 @@ pub mod external;
 pub mod swagger;
 pub mod user_exchanges;
 pub mod snapshots;
+pub mod strategies;
 
 

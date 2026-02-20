@@ -167,6 +167,17 @@ async fn main() -> std::io::Result<()> {
                     .route("", web::get().to(api::snapshots::get_snapshots))
             )
             
+            // Strategies: Trading strategies management
+            .service(
+                web::scope("/api/v1/strategies")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .service(api::strategies::get_strategies)
+                    .service(api::strategies::get_strategy)
+                    .service(api::strategies::create_strategy)
+                    .service(api::strategies::update_strategy)
+                    .service(api::strategies::delete_strategy)
+            )
+            
             // Balances: Real-time from exchanges via CCXT
             .service(
                 web::scope("/api/v1/balances")

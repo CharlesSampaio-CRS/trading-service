@@ -42,7 +42,12 @@ pub struct UserExchangeInfo {
     pub icon: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_passphrase: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,  // país de origem
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,      // URL da exchange
     pub created_at: String,
+    pub linked_at: String,  // Alias para created_at (compatibilidade frontend)
 }
 
 #[derive(Debug, Serialize)]
@@ -230,23 +235,28 @@ pub async fn list_user_exchanges(
             .find_one(doc! { "_id": exchange_oid })
             .await
         {
+            let created_at_str = ex.created_at
+                .and_then(|dt| {
+                    if let mongodb::bson::Bson::DateTime(dt) = dt {
+                        Some(dt.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string());
+            
             result.push(UserExchangeInfo {
                 exchange_id: ex.exchange_id,
-                exchange_type: catalog.ccxt_id,
-                exchange_name: catalog.nome.unwrap_or_else(|| "Unknown".to_string()),
+                exchange_type: catalog.ccxt_id.clone(),
+                exchange_name: catalog.nome.clone().unwrap_or_else(|| "Unknown".to_string()),
                 is_active: ex.is_active,
-                logo: catalog.logo,
-                icon: catalog.icon,
+                logo: catalog.logo.clone(),
+                icon: catalog.icon.clone(),
                 requires_passphrase: Some(catalog.requires_passphrase),
-                created_at: ex.created_at
-                    .and_then(|dt| {
-                        if let mongodb::bson::Bson::DateTime(dt) = dt {
-                            Some(dt.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| "Unknown".to_string()),
+                country: catalog.pais_de_origem.clone(),
+                url: catalog.url.clone(),
+                created_at: created_at_str.clone(),
+                linked_at: created_at_str,  // Mesmo valor que created_at
             });
         }
     }

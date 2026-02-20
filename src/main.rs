@@ -1,6 +1,7 @@
 mod api;
 mod ccxt;
 mod database;
+mod jobs;
 mod middleware;
 mod models;
 mod services;
@@ -60,6 +61,12 @@ async fn main() -> std::io::Result<()> {
     let db_data = web::Data::new(db.clone());
     
     log::info!("✅ MongoDB connected successfully");
+    
+    // 📅 Start daily snapshot scheduler
+    log::info!("📅 Starting background jobs...");
+    jobs::snapshot_scheduler::start_daily_snapshot_scheduler(db.clone()).await;
+    log::info!("✅ Background jobs started");
+    
     log::info!("🌐 Server starting on {}:{}", host, port);
     log::info!("📚 Swagger UI available at: http://{}:{}/swagger-ui/", host, port);
     log::info!("📄 OpenAPI spec at: http://{}:{}/api-docs/openapi.json", host, port);
@@ -150,6 +157,14 @@ async fn main() -> std::io::Result<()> {
                     .route("", web::get().to(api::user_exchanges::list_exchanges))
                     .route("/{exchange_id}", web::patch().to(api::user_exchanges::update_exchange))
                     .route("/{exchange_id}", web::delete().to(api::user_exchanges::delete_exchange))
+            )
+            
+            // Snapshots: Daily balance snapshots for PNL calculation
+            .service(
+                web::scope("/api/v1/snapshots")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .route("/save", web::post().to(api::snapshots::save_snapshot))
+                    .route("", web::get().to(api::snapshots::get_snapshots))
             )
             
             // Balances: Real-time from exchanges via CCXT

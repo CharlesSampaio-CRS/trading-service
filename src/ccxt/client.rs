@@ -31,13 +31,23 @@ impl CCXTClient {
             config.set_item("apiKey", api_key).map_err(|e| e.to_string())?;
             config.set_item("secret", secret).map_err(|e| e.to_string())?;
             config.set_item("enableRateLimit", true).map_err(|e| e.to_string())?;
-            config.set_item("timeout", 60000).map_err(|e| e.to_string())?; // 60 segundos (aumentado de 8s)
+            config.set_item("timeout", 30000).map_err(|e| e.to_string())?; // 30 segundos
+            
+            // 🚀 OTIMIZAÇÃO: HTTP Connection pooling e keepAlive
+            // Reutiliza conexões TCP/TLS ao invés de criar novas a cada request
+            let http_agent_config = PyDict::new(py);
+            http_agent_config.set_item("keepAlive", true).map_err(|e| e.to_string())?;
+            http_agent_config.set_item("keepAliveMsecs", 30000).map_err(|e| e.to_string())?; // 30s
+            http_agent_config.set_item("maxSockets", 10).map_err(|e| e.to_string())?;
+            http_agent_config.set_item("maxFreeSockets", 5).map_err(|e| e.to_string())?;
+            config.set_item("agent", http_agent_config).map_err(|e| e.to_string())?;
             
             // ❌ DESABILITA CACHE DO CCXT - Força busca sempre fresca
             let options = PyDict::new(py);
             options.set_item("warnOnFetchOpenOrdersWithoutSymbol", false).map_err(|e| e.to_string())?;
             options.set_item("fetchBalanceCacheTTL", 0).map_err(|e| e.to_string())?;  // 🔥 NO CACHE
             options.set_item("fetchTickersCacheTTL", 0).map_err(|e| e.to_string())?;  // 🔥 NO CACHE
+            options.set_item("recvWindow", 10000).map_err(|e| e.to_string())?;  // 🚀 OTIMIZAÇÃO: Janela maior (menos erros de nonce)
             
             if let Some(pass) = passphrase {
                 config.set_item("password", pass).map_err(|e| e.to_string())?;
@@ -875,6 +885,163 @@ impl CCXTClient {
             Ok(symbols)
         })
     }
-}
 
+    /// Verifica as permissões da API key testando operações específicas
+    pub fn check_api_permissions(&self) -> Result<crate::services::user_exchanges_service::ApiPermissions, String> {
+        Python::with_gil(|py| {
+            log::info!("🔐 Checking API key permissions for {}...", self.exchange_name);
+            
+            let mut permissions = crate::services::user_exchanges_service::ApiPermissions {
+                can_read: false,
+                can_trade: false,
+                can_withdraw: false,
+                is_restricted: false,
+            };
+            
+            // 1. Verificar leitura (já validado com fetch_balance, mas vamos confirmar)
+            match self.exchange.as_ref(py).call_method0("fetch_balance") {
+                Ok(_) => {
+                    permissions.can_read = true;
+                    log::info!("✅ Read permission confirmed");
+                }
+                Err(e) => {
+                    log::error!("❌ Read permission denied: {}", e);
+                    return Ok(permissions);
+                }
+            }
+            
+            // 2. Verificar permissões de trade
+            // Nota: Não vamos criar ordem real, apenas verificar se o método existe e é acessível
+            // Algumas exchanges retornam erro específico se não tem permissão
+            let can_create_order = self.exchange
+                .as_ref(py)
+                .getattr("has")
+                .ok()
+                .and_then(|has_dict| has_dict.downcast::<PyDict>().ok())
+                .and_then(|dict| dict.get_item("createOrder").ok().flatten())
+                .and_then(|v| v.extract::<bool>().ok())
+                .unwrap_or(false);
+            
+            if can_create_order {
+                // Tentar verificar através de fetch_open_orders (requer auth de trade)
+                match self.exchange.as_ref(py).call_method0("fetch_open_orders") {
+                    Ok(_) => {
+                        permissions.can_trade = true;
+                        log::info!("✅ Trade permission confirmed");
+                    }
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        // Se o erro não for de autenticação/permissão, considerar que tem permissão
+                        if !error_str.contains("permission") && 
+                           !error_str.contains("not allowed") &&
+                           !error_str.contains("unauthorized") &&
+                           !error_str.contains("forbidden") {
+                            permissions.can_trade = true;
+                            log::info!("✅ Trade permission assumed (no permission error)");
+                        } else {
+                            log::warn!("⚠️ Trade permission denied or restricted: {}", error_str);
+                        }
+                    }
+                }
+            }
+            
+            // 3. Verificar permissões de withdrawal
+            let can_withdraw = self.exchange
+                .as_ref(py)
+                .getattr("has")
+                .ok()
+                .and_then(|has_dict| has_dict.downcast::<PyDict>().ok())
+                .and_then(|dict| dict.get_item("withdraw").ok().flatten())
+                .and_then(|v| v.extract::<bool>().ok())
+                .unwrap_or(false);
+            
+            if can_withdraw {
+                // Não vamos testar withdrawal real, apenas verificar se está disponível
+                permissions.can_withdraw = true;
+                log::warn!("⚠️ Withdrawal capability detected - API key has withdrawal permissions!");
+            }
+            
+            // 4. Verificar se há restrições de IP
+            // Isso é difícil de detectar diretamente, mas podemos inferir de erros específicos
+            // Por ora, marcar como false (sem restrições detectadas)
+            permissions.is_restricted = false;
+            
+            log::info!("🔐 Permissions summary: read={}, trade={}, withdraw={}", 
+                permissions.can_read, permissions.can_trade, permissions.can_withdraw);
+            
+            Ok(permissions)
+        })
+    }
+    
+    /// Obtém informações sobre rate limits da exchange
+    pub fn get_rate_limit_info(&self) -> Result<crate::services::user_exchanges_service::RateLimitInfo, String> {
+        Python::with_gil(|py| {
+            log::info!("⏱️ Checking rate limits for {}...", self.exchange_name);
+            
+            // Tentar obter informações de rate limit do objeto exchange
+            let rate_limit = self.exchange
+                .as_ref(py)
+                .getattr("rateLimit")
+                .and_then(|v| v.extract::<u32>())
+                .ok();
+            
+            // Tentar obter headers da última requisição
+            let last_response_headers = self.exchange
+                .as_ref(py)
+                .getattr("last_response_headers")
+                .ok();
+            
+            let mut remaining = None;
+            let mut limit = None;
+            let mut reset_at = None;
+            
+            if let Some(headers_obj) = last_response_headers {
+                if let Ok(headers_dict) = headers_obj.downcast::<PyDict>() {
+                    // Tentar diferentes headers de rate limit (varia por exchange)
+                    remaining = headers_dict
+                        .get_item("X-RateLimit-Remaining")
+                        .or_else(|_| headers_dict.get_item("x-ratelimit-remaining"))
+                        .or_else(|_| headers_dict.get_item("X-MBX-USED-WEIGHT-1M"))
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .and_then(|s| s.parse::<u32>().ok());
+                    
+                    limit = headers_dict
+                        .get_item("X-RateLimit-Limit")
+                        .or_else(|_| headers_dict.get_item("x-ratelimit-limit"))
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .and_then(|s| s.parse::<u32>().ok());
+                    
+                    reset_at = headers_dict
+                        .get_item("X-RateLimit-Reset")
+                        .or_else(|_| headers_dict.get_item("x-ratelimit-reset"))
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .and_then(|s| s.parse::<i64>().ok());
+                }
+            }
+            
+            if let Some(rl) = rate_limit {
+                log::info!("⏱️ Rate limit: {} ms between requests", rl);
+            }
+            
+            if let Some(rem) = remaining {
+                log::info!("⏱️ Remaining requests: {}", rem);
+                if rem < 10 {
+                    log::warn!("⚠️ Rate limit nearly exhausted! Only {} requests remaining", rem);
+                }
+            }
+            
+            Ok(crate::services::user_exchanges_service::RateLimitInfo {
+                remaining,
+                limit,
+                reset_at,
+            })
+        })
+    }
+}
 

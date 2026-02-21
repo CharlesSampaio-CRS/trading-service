@@ -265,6 +265,31 @@ pub async fn fetch_balances_from_exchanges(
     })
 }
 
+/// 🚀 OTIMIZAÇÃO: Retorna timeout ideal baseado na performance histórica de cada exchange
+fn get_optimal_timeout(exchange_id: &str) -> std::time::Duration {
+    match exchange_id.to_lowercase().as_str() {
+        // Exchanges rápidas (Tier 1)
+        "binance" => std::time::Duration::from_secs(10),
+        "coinbase" => std::time::Duration::from_secs(12),
+        "kraken" => std::time::Duration::from_secs(12),
+        "okx" => std::time::Duration::from_secs(10),
+        
+        // Exchanges médias (Tier 2)
+        "bybit" => std::time::Duration::from_secs(20),
+        "kucoin" => std::time::Duration::from_secs(20),
+        "huobi" => std::time::Duration::from_secs(20),
+        "gateio" => std::time::Duration::from_secs(25),
+        
+        // Exchanges lentas (Tier 3)
+        "mexc" => std::time::Duration::from_secs(45),
+        "bitfinex" => std::time::Duration::from_secs(30),
+        "bitmart" => std::time::Duration::from_secs(35),
+        
+        // Default para exchanges desconhecidas
+        _ => std::time::Duration::from_secs(25),
+    }
+}
+
 async fn fetch_exchange_balance(exchange: DecryptedExchange) -> Result<ExchangeBalance, String> {
     fetch_exchange_balance_with_retry(exchange, 3).await
 }
@@ -272,8 +297,9 @@ async fn fetch_exchange_balance(exchange: DecryptedExchange) -> Result<ExchangeB
 async fn fetch_exchange_balance_with_retry(exchange: DecryptedExchange, max_retries: u32) -> Result<ExchangeBalance, String> {
     log::debug!("Fetching balance for exchange: {} ({})", exchange.name, exchange.ccxt_id);
     
-    // ⏱️ Timeout aumentado para 60s (exchanges lentas como MEXC)
-    let timeout_duration = std::time::Duration::from_secs(60);
+    // 🚀 OTIMIZAÇÃO: Timeout adaptativo baseado na exchange
+    let timeout_duration = get_optimal_timeout(&exchange.ccxt_id);
+    log::debug!("⏱️ [{}] Using adaptive timeout: {:?}", exchange.name, timeout_duration);
     
     let exchange_name = exchange.name.clone();
     let exchange_id = exchange.exchange_id.clone();
@@ -373,34 +399,50 @@ async fn fetch_exchange_balance_with_retry(exchange: DecryptedExchange, max_retr
     let balances_result = final_result.expect("Should have result after retry loop");
     match balances_result {
         Ok(mut balances) => {
-            // 🌍 CONVERSÃO DE MOEDAS FIDUCIÁRIAS: BRL, EUR, etc.
-            // Adiciona preços USD para moedas fiduciárias que não têm ticker na exchange
+            // 🚀 OTIMIZAÇÃO: BATCH CONVERSION - Busca todas taxas em 1 chamada ao invés de N
             let fiat_currencies = vec!["BRL", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"];
             
-            for currency in fiat_currencies.iter() {
-                if let Some(balance) = balances.get_mut(*currency) {
-                    // Se já tem usd_value (do ticker), não precisa converter
-                    if balance.usd_value.is_none() && balance.total > 0.0 {
-                        log::debug!("🌍 [{}] Converting {} to USD via exchange rate...", 
-                            exchange_name, currency);
+            // Identifica quais moedas fiduciárias precisam de conversão
+            let currencies_to_convert: Vec<&str> = fiat_currencies.iter()
+                .filter(|&&currency| {
+                    if let Some(balance) = balances.get(currency) {
+                        balance.usd_value.is_none() && balance.total > 0.0
+                    } else {
+                        false
+                    }
+                })
+                .copied()
+                .collect();
+            
+            // 🚀 Se houver moedas para converter, busca TODAS de uma vez
+            if !currencies_to_convert.is_empty() {
+                log::debug!("🌍 [{}] Batch converting {} currencies to USD: {:?}", 
+                    exchange_name, currencies_to_convert.len(), currencies_to_convert);
+                
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(2000),
+                    crate::services::exchange_rate_service::get_batch_exchange_rates(currencies_to_convert.clone(), "USD")
+                ).await {
+                    Ok(Ok(rates)) => {
+                        log::info!("✅ [{}] Batch fetched {} exchange rates", exchange_name, rates.len());
                         
-                        match tokio::time::timeout(
-                            std::time::Duration::from_millis(2000),
-                            crate::services::exchange_rate_service::get_exchange_rate(currency, "USD")
-                        ).await {
-                            Ok(Ok(rate)) => {
-                                let usd_value = balance.total * rate;
-                                balance.usd_value = Some(usd_value);
-                                log::debug!("🌍 [{}] {} {}: {} × {:.6} = ${:.2}", 
-                                    exchange_name, currency, balance.total, currency, rate, usd_value);
-                            }
-                            Ok(Err(e)) => {
-                                log::warn!("⚠️  [{}] Failed to fetch {} rate: {}", exchange_name, currency, e);
-                            }
-                            Err(_) => {
-                                log::warn!("⚠️  [{}] Rate fetch timeout for {}", exchange_name, currency);
+                        // Aplica taxas a todos os balances
+                        for currency in currencies_to_convert {
+                            if let Some(balance) = balances.get_mut(currency) {
+                                if let Some(&rate) = rates.get(&currency.to_uppercase()) {
+                                    let usd_value = balance.total * rate;
+                                    balance.usd_value = Some(usd_value);
+                                    log::debug!("🌍 [{}] {}: {} × {:.6} = ${:.2}", 
+                                        exchange_name, currency, balance.total, rate, usd_value);
+                                }
                             }
                         }
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("⚠️  [{}] Batch rate fetch failed: {}", exchange_name, e);
+                    }
+                    Err(_) => {
+                        log::warn!("⚠️  [{}] Batch rate fetch timeout", exchange_name);
                     }
                 }
             }

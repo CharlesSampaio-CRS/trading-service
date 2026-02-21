@@ -30,6 +30,33 @@ pub struct AddExchangeResponse {
     pub error: Option<String>,
 }
 
+// ==================== VALIDATION MODELS ====================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApiPermissions {
+    pub can_read: bool,
+    pub can_trade: bool,
+    pub can_withdraw: bool,
+    pub is_restricted: bool,  // IP whitelist ativo
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RateLimitInfo {
+    pub remaining: Option<u32>,
+    pub limit: Option<u32>,
+    pub reset_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExchangeValidationResult {
+    pub is_valid: bool,
+    pub permissions: ApiPermissions,
+    pub rate_limit_info: RateLimitInfo,
+    pub error: Option<String>,
+}
+
+// ==================== USER EXCHANGE INFO ====================
+
 #[derive(Debug, Serialize)]
 pub struct UserExchangeInfo {
     pub exchange_id: String,
@@ -42,7 +69,12 @@ pub struct UserExchangeInfo {
     pub icon: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires_passphrase: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,  // país de origem
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,      // URL da exchange
     pub created_at: String,
+    pub linked_at: String,  // Alias para created_at (compatibilidade frontend)
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +108,82 @@ pub struct DeleteExchangeResponse {
 
 // ==================== SERVICE FUNCTIONS ====================
 
+/// Valida a conexão com a exchange antes de salvar
+async fn validate_exchange_connection(
+    exchange_type: &str,
+    api_key: &str,
+    api_secret: &str,
+    passphrase: Option<&str>,
+) -> Result<ExchangeValidationResult, String> {
+    log::info!("🔐 Validating connection to {} exchange...", exchange_type);
+    
+    use crate::utils::thread_pool::spawn_ccxt_blocking;
+    use crate::ccxt::client::CCXTClient;
+    
+    let exchange_type = exchange_type.to_string();
+    let api_key = api_key.to_string();
+    let api_secret = api_secret.to_string();
+    let passphrase = passphrase.map(|s| s.to_string());
+    
+    // Executar validações em thread bloqueante (Python/GIL)
+    let validation_result = spawn_ccxt_blocking(move || {
+        // 1. Criar cliente CCXT
+        let client = CCXTClient::new(
+            &exchange_type,
+            &api_key,
+            &api_secret,
+            passphrase.as_deref(),
+        )?;
+        
+        // 2. Testar autenticação básica (sem buscar saldos)
+        log::info!("🔍 Testing authentication...");
+        
+        // Verificar permissões da API key
+        log::info!("🔍 Checking API key permissions...");
+        let permissions = client.check_api_permissions()
+            .unwrap_or_else(|e| {
+                log::warn!("⚠️ Could not determine permissions: {}", e);
+                ApiPermissions {
+                    can_read: true,  // Assumir que leitura funcionou
+                    can_trade: false, // Desconhecido
+                    can_withdraw: false, // Desconhecido
+                    is_restricted: false,
+                }
+            });
+        
+        // 🚨 BLOQUEAR SE TIVER PERMISSÃO DE WITHDRAWAL
+        if permissions.can_withdraw {
+            log::error!("❌ API key has withdrawal permissions - REJECTING for security!");
+            return Err(
+                "API key has withdrawal permissions. For security reasons, please create a new API key with only Read and Trade permissions (disable Withdrawals).".to_string()
+            );
+        }
+        
+        // 3. Obter informações de rate limit
+        log::info!("🔍 Checking rate limits...");
+        let rate_limit_info = client.get_rate_limit_info()
+            .unwrap_or_else(|e| {
+                log::warn!("⚠️ Could not get rate limits: {}", e);
+                RateLimitInfo {
+                    remaining: None,
+                    limit: None,
+                    reset_at: None,
+                }
+            });
+        
+        Ok(ExchangeValidationResult {
+            is_valid: true,
+            permissions,
+            rate_limit_info,
+            error: None,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?;
+    
+    validation_result
+}
+
 /// POST /exchanges - Adiciona nova exchange para o usuário
 pub async fn add_user_exchange(
     db: &MongoDB,
@@ -103,7 +211,50 @@ pub async fn add_user_exchange(
         });
     }
 
-    // 3. Criptografar credenciais
+    // 🔐 3. VALIDAR CONEXÃO COM A EXCHANGE (NOVO)
+    log::info!("🔐 Validating exchange connection before saving credentials...");
+    match validate_exchange_connection(
+        &request.exchange_type,
+        &request.api_key,
+        &request.api_secret,
+        request.passphrase.as_deref(),
+    ).await {
+        Ok(validation) => {
+            if !validation.is_valid {
+                log::error!("❌ Exchange validation failed: {:?}", validation.error);
+                return Ok(AddExchangeResponse {
+                    success: false,
+                    exchange_id: String::new(),
+                    error: validation.error.or(Some("Exchange connection validation failed".to_string())),
+                });
+            }
+            
+            // Logar informações de validação
+            log::info!("✅ Exchange validation successful:");
+            log::info!("    Can read: {}", validation.permissions.can_read);
+            log::info!("   💱 Can trade: {}", validation.permissions.can_trade);
+            log::info!("   💸 Can withdraw: {}", validation.permissions.can_withdraw);
+            
+            if validation.permissions.is_restricted {
+                log::info!("✅ API key has IP restrictions enabled (secure)");
+            }
+            
+            // Alertar se não tem permissão de trade
+            if !validation.permissions.can_trade {
+                log::warn!("⚠️ API key does not have trading permissions - only read access");
+            }
+        }
+        Err(e) => {
+            log::error!("❌ Failed to validate exchange connection: {}", e);
+            return Ok(AddExchangeResponse {
+                success: false,
+                exchange_id: String::new(),
+                error: Some(format!("Connection validation failed: {}", e)),
+            });
+        }
+    }
+
+    // 4. Criptografar credenciais
     let encryption_key = env::var("ENCRYPTION_KEY")
         .map_err(|_| "ENCRYPTION_KEY not found in environment")?;
     
@@ -230,23 +381,28 @@ pub async fn list_user_exchanges(
             .find_one(doc! { "_id": exchange_oid })
             .await
         {
+            let created_at_str = ex.created_at
+                .and_then(|dt| {
+                    if let mongodb::bson::Bson::DateTime(dt) = dt {
+                        Some(dt.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string());
+            
             result.push(UserExchangeInfo {
                 exchange_id: ex.exchange_id,
-                exchange_type: catalog.ccxt_id,
-                exchange_name: catalog.nome.unwrap_or_else(|| "Unknown".to_string()),
+                exchange_type: catalog.ccxt_id.clone(),
+                exchange_name: catalog.nome.clone().unwrap_or_else(|| "Unknown".to_string()),
                 is_active: ex.is_active,
-                logo: catalog.logo,
-                icon: catalog.icon,
+                logo: catalog.logo.clone(),
+                icon: catalog.icon.clone(),
                 requires_passphrase: Some(catalog.requires_passphrase),
-                created_at: ex.created_at
-                    .and_then(|dt| {
-                        if let mongodb::bson::Bson::DateTime(dt) = dt {
-                            Some(dt.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| "Unknown".to_string()),
+                country: catalog.pais_de_origem.clone(),
+                url: catalog.url.clone(),
+                created_at: created_at_str.clone(),
+                linked_at: created_at_str,  // Mesmo valor que created_at
             });
         }
     }

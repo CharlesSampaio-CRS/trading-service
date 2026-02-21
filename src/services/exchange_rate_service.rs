@@ -80,6 +80,63 @@ pub async fn get_exchange_rate(
     Ok(rate)
 }
 
+/// 🚀 OTIMIZAÇÃO: Busca múltiplas taxas de câmbio em uma única chamada
+/// Reduz N chamadas para 1 chamada (muito mais rápido!)
+pub async fn get_batch_exchange_rates(
+    from_currencies: Vec<&str>,
+    to: &str,
+) -> Result<HashMap<String, f64>, String> {
+    log::info!("💱 Fetching batch exchange rates: {:?} -> {}", from_currencies, to);
+
+    if from_currencies.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Busca todas as taxas a partir da moeda destino
+    let url = format!("{}/{}", EXCHANGERATE_API_BASE, to.to_uppercase());
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch batch exchange rates: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Exchange rate API error: {}", response.status()));
+    }
+
+    let rates_data: ExchangeRatesResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse exchange rates: {}", e))?;
+
+    // Extrai apenas as moedas solicitadas e inverte a taxa (FROM/TO ao invés de TO/FROM)
+    let mut result = HashMap::new();
+    for currency in from_currencies {
+        let currency_upper = currency.to_uppercase();
+        
+        // Se moeda de origem == moeda destino, taxa = 1.0
+        if currency_upper == to.to_uppercase() {
+            result.insert(currency_upper.clone(), 1.0);
+            continue;
+        }
+        
+        if let Some(&rate) = rates_data.rates.get(&currency_upper) {
+            // Inverte a taxa: se 1 USD = 5.5 BRL, então 1 BRL = 1/5.5 USD
+            let inverted_rate = 1.0 / rate;
+            result.insert(currency_upper.clone(), inverted_rate);
+            log::debug!("💱 {}/{}: {:.6}", currency, to, inverted_rate);
+        }
+    }
+
+    log::info!("✅ Fetched {} batch exchange rates to {}", result.len(), to);
+
+    Ok(result)
+}
+
 /// Converte um valor de uma moeda para outra
 pub async fn convert_currency(
     from: &str,

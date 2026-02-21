@@ -5,7 +5,7 @@ use crate::models::{Strategy, CreateStrategyRequest, UpdateStrategyRequest, Stra
 use crate::middleware::auth::Claims;
 
 /// GET /api/v1/strategies - Lista todas as estratégias do usuário
-#[get("/api/v1/strategies")]
+#[get("")]
 pub async fn get_strategies(user: web::ReqData<Claims>, db: web::Data<MongoDB>) -> impl Responder {
     let user_id = &user.sub;
 
@@ -45,7 +45,7 @@ pub async fn get_strategies(user: web::ReqData<Claims>, db: web::Data<MongoDB>) 
 }
 
 /// GET /api/v1/strategies/{id} - Busca estratégia específica
-#[get("/api/v1/strategies/{id}")]
+#[get("/{id}")]
 pub async fn get_strategy(user: web::ReqData<Claims>, path: web::Path<String>, db: web::Data<MongoDB>) -> impl Responder {
     let user_id = &user.sub;
 
@@ -82,7 +82,7 @@ pub async fn get_strategy(user: web::ReqData<Claims>, path: web::Path<String>, d
 }
 
 /// POST /api/v1/strategies - Cria nova estratégia
-#[post("/api/v1/strategies")]
+#[post("")]
 pub async fn create_strategy(
     user: web::ReqData<Claims>,
     body: web::Json<CreateStrategyRequest>,
@@ -126,7 +126,7 @@ pub async fn create_strategy(
 }
 
 /// PUT /api/v1/strategies/{id} - Atualiza estratégia
-#[put("/api/v1/strategies/{id}")]
+#[put("/{id}")]
 pub async fn update_strategy(
     user: web::ReqData<Claims>,
     path: web::Path<String>,
@@ -229,7 +229,7 @@ pub async fn update_strategy(
 }
 
 /// DELETE /api/v1/strategies/{id} - Deleta estratégia
-#[delete("/api/v1/strategies/{id}")]
+#[delete("/{id}")]
 pub async fn delete_strategy(user: web::ReqData<Claims>, path: web::Path<String>, db: web::Data<MongoDB>) -> impl Responder {
     let user_id = &user.sub;
 

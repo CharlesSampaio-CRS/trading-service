@@ -195,18 +195,18 @@ async fn main() -> std::io::Result<()> {
                     )
             )
             
-            // Orders: Create/Cancel on exchanges via CCXT (Zero Database Architecture)
+            // ==================== ORDERS API ====================
+            // Zero Database Architecture - Orders fetched directly from exchanges via CCXT
+            // All endpoints require JWT authentication
             .service(
                 web::scope("/api/v1/orders")
-                    .route("/fetch", web::post().to(api::orders::fetch_orders_from_credentials)) // ✅ Buscar orders com creds do frontend
-                    .route("/create-with-creds", web::post().to(api::orders::create_order_with_creds)) // ✅ Criar com creds do frontend
-                    .route("/cancel-with-creds", web::post().to(api::orders::cancel_order_with_creds)) // ✅ Cancelar com creds do frontend
-                    // Protected endpoint requiring JWT authentication
-                    .service(
-                        web::resource("/fetch/secure")
-                            .wrap(middleware::auth::AuthMiddleware)
-                            .route(web::post().to(api::orders::fetch_orders_secure))
-                    )
+                    .wrap(middleware::auth::AuthMiddleware)
+                    // 📊 Fetch orders from user's exchanges
+                    .route("/fetch/secure", web::post().to(api::orders::fetch_orders_secure))
+                    // ➕ Create new order
+                    .route("/create", web::post().to(api::orders::create_order_secure))
+                    // ❌ Cancel existing order
+                    .route("/cancel", web::post().to(api::orders::cancel_order_secure))
             )
             
             // Tickers: Real-time prices via CCXT

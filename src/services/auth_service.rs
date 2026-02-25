@@ -125,10 +125,10 @@ fn get_jwt_audience() -> String {
     std::env::var("JWT_AUDIENCE").unwrap_or_else(|_| "trading-api".to_string())
 }
 
-// Generate JWT token
+// Generate JWT token (1 hour expiry - refreshed automatically by client)
 pub fn generate_jwt(user: &User) -> Result<String, String> {
     let iat = Utc::now().timestamp() as usize;
-    let exp = (Utc::now() + Duration::hours(24)).timestamp() as usize;
+    let exp = (Utc::now() + Duration::hours(1)).timestamp() as usize;
     let jti = Uuid::new_v4().to_string();
     
     let claims = Claims {

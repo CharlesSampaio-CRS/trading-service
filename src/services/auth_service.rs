@@ -36,7 +36,8 @@ pub struct User {
     pub name: Option<String>,
     pub picture: Option<String>,
     pub google_id: Option<String>,
-    pub provider: Option<String>,  // "google", "local", etc.
+    pub apple_id: Option<String>,
+    pub provider: Option<String>,  // "google", "apple", "local", etc.
     #[serde(default = "default_roles")]
     pub roles: Vec<String>,
     #[serde(default = "default_is_active")]
@@ -56,17 +57,21 @@ fn default_is_active() -> bool {
 }
 
 // Request/Response structures
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RegisterRequest {
-    pub email: String,
-    pub password: String,
+    pub email: Option<String>,
+    pub password: Option<String>,
     pub name: Option<String>,
+    pub google_id: Option<String>,
+    pub apple_id: Option<String>,
+    pub picture: Option<String>,
+    pub provider: Option<String>,  // "local", "google", or "apple"
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +79,7 @@ pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AuthResponse {
     pub success: bool,
     pub token: String,
@@ -82,7 +87,7 @@ pub struct AuthResponse {
     pub user: UserInfo,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UserInfo {
     pub id: String,
     pub email: String,
@@ -96,6 +101,16 @@ pub struct GoogleAuthUrlResponse {
     pub success: bool,
     pub auth_url: String,
     pub state: String,
+}
+
+// Type aliases for API documentation
+pub type LoginResponse = AuthResponse;
+pub type RegisterResponse = AuthResponse;
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct VerifyTokenResponse {
+    pub valid: bool,
+    pub user: Option<UserInfo>,
 }
 
 fn get_jwt_secret() -> String {
@@ -238,18 +253,67 @@ pub async fn register(
 ) -> Result<AuthResponse, String> {
     let collection = db.collection::<User>("users");
     
-    // Check if user already exists
-    let filter = doc! {
-        "email": &request.email,
-    };
+    // Validação: email sempre é obrigatório
+    let email = request.email.as_ref()
+        .ok_or_else(|| "Email is required".to_string())?;
+    
+    // Determina o provider (default: local)
+    let provider = request.provider.as_deref().unwrap_or("local");
+    
+    // Validação baseada no provider
+    match provider {
+        "local" => {
+            // Registro local: password obrigatório
+            if request.password.is_none() {
+                return Err("Password is required for local registration".to_string());
+            }
+        }
+        "google" => {
+            // Registro Google: google_id obrigatório
+            if request.google_id.is_none() {
+                return Err("Google ID is required for Google registration".to_string());
+            }
+        }
+        "apple" => {
+            // Registro Apple: apple_id obrigatório
+            if request.apple_id.is_none() {
+                return Err("Apple ID is required for Apple registration".to_string());
+            }
+        }
+        _ => return Err(format!("Invalid provider: {}. Supported: local, google, apple", provider)),
+    }
+    
+    // Check if user already exists (por email ou OAuth ID)
+    let mut filter = doc! { "email": email };
+    
+    // Também verificar por OAuth ID se fornecido
+    if let Some(google_id) = &request.google_id {
+        filter = doc! {
+            "$or": [
+                { "email": email },
+                { "google_id": google_id }
+            ]
+        };
+    } else if let Some(apple_id) = &request.apple_id {
+        filter = doc! {
+            "$or": [
+                { "email": email },
+                { "apple_id": apple_id }
+            ]
+        };
+    }
     
     if let Some(_) = collection.find_one(filter).await.map_err(|e| format!("Database error: {}", e))? {
         return Err("User already exists".to_string());
     }
     
-    // Hash password
-    let hashed_password = hash(&request.password, DEFAULT_COST)
-        .map_err(|e| format!("Failed to hash password: {}", e))?;
+    // Hash password (apenas se fornecido para registro local)
+    let hashed_password = if let Some(pwd) = &request.password {
+        Some(hash(pwd, DEFAULT_COST)
+            .map_err(|e| format!("Failed to hash password: {}", e))?)
+    } else {
+        None
+    };
     
     // Generate user_id
     let new_user_id = ObjectId::new().to_hex();
@@ -257,12 +321,13 @@ pub async fn register(
     let new_user = User {
         _id: None,
         user_id: new_user_id.clone(),
-        email: request.email.clone(),
-        password: Some(hashed_password),  // Wrap in Some() for password-based auth
+        email: email.clone(),
+        password: hashed_password,
         name: request.name.clone(),
-        picture: None,
-        google_id: None,
-        provider: Some("local".to_string()),
+        picture: request.picture.clone(),
+        google_id: request.google_id.clone(),
+        apple_id: request.apple_id.clone(),
+        provider: Some(provider.to_string()),
         roles: vec!["user".to_string()],
         is_active: true,
         created_at: Some(BsonDateTime::now()),
@@ -278,6 +343,8 @@ pub async fn register(
     let token = generate_jwt(&new_user)?;
     let refresh_token = generate_refresh_token(&new_user_id)?;
     
+    log::info!("✅ User registered successfully: {} (provider: {})", email, provider);
+    
     Ok(AuthResponse {
         success: true,
         token,
@@ -286,7 +353,7 @@ pub async fn register(
             id: new_user_id,
             email: new_user.email,
             name: new_user.name,
-            picture: None,
+            picture: new_user.picture,
             roles: new_user.roles,
         },
     })
@@ -547,6 +614,7 @@ pub async fn handle_google_callback(
                 name: name.clone(),
                 picture: picture.clone(),
                 google_id: Some(google_id.to_string()),
+                apple_id: None,
                 provider: Some("google".to_string()),
                 roles: vec!["user".to_string()],
                 is_active: true,

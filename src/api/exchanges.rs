@@ -1,6 +1,6 @@
 use actix_web::{web, HttpResponse};
 use crate::database::MongoDB;
-use crate::services::exchange_service;
+use crate::services::exchange_service::{self, AvailableExchangesResponse};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -8,6 +8,19 @@ pub struct TokenDetailsQuery {
     user_id: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/exchanges/available",
+    tag = "Exchanges",
+    responses(
+        (status = 200, description = "List of available exchanges", body = AvailableExchangesResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 pub async fn get_available_exchanges(db: web::Data<MongoDB>) -> HttpResponse {
     log::info!("📋 GET /exchanges/available - fetching catalog");
     

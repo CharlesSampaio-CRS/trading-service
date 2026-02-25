@@ -17,9 +17,12 @@ pub fn decrypt_fernet_via_python(encrypted_data: &str, key: &str) -> Result<Stri
             .call1((key,))
             .map_err(|e| format!("Failed to create Fernet instance: {}", e))?;
         
+        // Convert encrypted string to bytes (Python Fernet expects bytes)
+        let encrypted_bytes = encrypted_data.as_bytes();
+        
         // Decrypt
         let decrypted_bytes = fernet
-            .call_method1("decrypt", (encrypted_data,))
+            .call_method1("decrypt", (encrypted_bytes,))
             .map_err(|e| format!("Failed to decrypt: {}", e))?;
         
         // Convert bytes to string

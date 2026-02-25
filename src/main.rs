@@ -1,6 +1,7 @@
 mod api;
 mod ccxt;
 mod database;
+mod jobs;
 mod middleware;
 mod models;
 mod services;
@@ -10,6 +11,8 @@ use actix_cors::Cors;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use dotenv::dotenv;
 use std::env;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -58,7 +61,15 @@ async fn main() -> std::io::Result<()> {
     let db_data = web::Data::new(db.clone());
     
     log::info!("✅ MongoDB connected successfully");
+    
+    // 📅 Start daily snapshot scheduler
+    log::info!("📅 Starting background jobs...");
+    jobs::snapshot_scheduler::start_daily_snapshot_scheduler(db.clone()).await;
+    log::info!("✅ Background jobs started");
+    
     log::info!("🌐 Server starting on {}:{}", host, port);
+    log::info!("📚 Swagger UI available at: http://{}:{}/swagger-ui/", host, port);
+    log::info!("📄 OpenAPI spec at: http://{}:{}/api-docs/openapi.json", host, port);
     
     // Start HTTP server
     HttpServer::new(move || {
@@ -83,12 +94,20 @@ async fn main() -> std::io::Result<()> {
             .supports_credentials()
             .max_age(3600);
         
+        // Generate OpenAPI specification
+        let openapi = api::swagger::ApiDoc::openapi();
+        
         App::new()
             .app_data(db_data.clone())
             .wrap(cors)
             .wrap(middleware::SecurityHeaders)
             .wrap(Logger::default())
             .wrap(Logger::new("%a %{User-Agent}i"))
+            // Swagger UI with authentication
+            .service(
+                SwaggerUi::new("/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", openapi.clone())
+            )
             // Health check
             .route("/health", web::get().to(api::health::health_check))
             // Metrics
@@ -115,36 +134,79 @@ async fn main() -> std::io::Result<()> {
                     .route("/{exchange_id}/token/{symbol}", web::get().to(api::exchanges::get_token_details))
             )
             
-            // Tokens: Global catalog (READ ONLY) + MongoDB cache
+            // Tokens: Global catalog (READ ONLY)
             .service(
                 web::scope("/api/v1/tokens")
                     .route("", web::get().to(api::tokens::get_tokens))
                     .route("/available", web::get().to(api::tokens::get_available_tokens))
-                    .route("/by-ccxt", web::get().to(api::tokens::get_available_tokens_by_ccxt))  // Get tokens by CCXT ID (MongoDB cache)
+                    .route("/by-ccxt", web::get().to(api::tokens::get_available_tokens_by_ccxt))  // Get tokens by CCXT ID
                     .route("/search", web::get().to(api::tokens::search_tokens))
+                    .route("/search", web::post().to(api::tokens::post_token_search))  // Local-first: receives credentials
                     .route("/details", web::post().to(api::tokens::get_token_details_with_creds))  // Zero Database: receives credentials
+                    .route("/details/multi", web::post().to(api::tokens::get_token_details_multi))  // Multi-exchange comparison
                     .route("/{symbol}", web::get().to(api::tokens::get_token))  // DEVE FICAR POR ÚLTIMO (catch-all)
             )
             
             // ==================== CCXT REAL-TIME DATA ====================
             
+            // User Exchanges: Manage connected exchanges (CRUD) - Requires JWT
+            .service(
+                web::scope("/api/v1/user/exchanges")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .route("", web::post().to(api::user_exchanges::add_exchange))
+                    .route("", web::get().to(api::user_exchanges::list_exchanges))
+                    .route("/{exchange_id}", web::patch().to(api::user_exchanges::update_exchange))
+                    .route("/{exchange_id}", web::delete().to(api::user_exchanges::delete_exchange))
+            )
+            
+            // Snapshots: Daily balance snapshots for PNL calculation
+            .service(
+                web::scope("/api/v1/snapshots")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .route("/save", web::post().to(api::snapshots::save_snapshot))
+                    .route("", web::get().to(api::snapshots::get_snapshots))
+            )
+            
+            // Strategies: Trading strategies management
+            .service(
+                web::scope("/api/v1/strategies")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .service(api::strategies::get_strategies)
+                    .service(api::strategies::get_strategy)
+                    .service(api::strategies::create_strategy)
+                    .service(api::strategies::update_strategy)
+                    .service(api::strategies::delete_strategy)
+            )
+            
             // Balances: Real-time from exchanges via CCXT
             .service(
                 web::scope("/api/v1/balances")
-                    // Endpoint unificado: GET (MongoDB) ou POST (credenciais do frontend)
+                    // Public endpoints (no JWT required)
                     .route("", web::get().to(api::balances::get_balances))
                     .route("", web::post().to(api::balances::post_balances))
                     .route("/summary", web::get().to(api::balances::get_balance_summary))
                     .route("/exchange/{id}", web::get().to(api::balances::get_exchange_balance))
                     .route("/market-movers", web::get().to(api::balances::get_market_movers))
+                    // Protected endpoint requiring JWT authentication
+                    .service(
+                        web::resource("/secure")
+                            .wrap(middleware::auth::AuthMiddleware)
+                            .route(web::post().to(api::balances::post_balances_secure))
+                    )
             )
             
-            // Orders: Create/Cancel on exchanges via CCXT (Zero Database Architecture)
+            // ==================== ORDERS API ====================
+            // Zero Database Architecture - Orders fetched directly from exchanges via CCXT
+            // All endpoints require JWT authentication
             .service(
                 web::scope("/api/v1/orders")
-                    .route("/fetch", web::post().to(api::orders::fetch_orders_from_credentials)) // ✅ Buscar orders com creds do frontend
-                    .route("/create-with-creds", web::post().to(api::orders::create_order_with_creds)) // ✅ Criar com creds do frontend
-                    .route("/cancel-with-creds", web::post().to(api::orders::cancel_order_with_creds)) // ✅ Cancelar com creds do frontend
+                    .wrap(middleware::auth::AuthMiddleware)
+                    // 📊 Fetch orders from user's exchanges
+                    .route("/fetch/secure", web::post().to(api::orders::fetch_orders_secure))
+                    // ➕ Create new order
+                    .route("/create", web::post().to(api::orders::create_order_secure))
+                    // ❌ Cancel existing order
+                    .route("/cancel", web::post().to(api::orders::cancel_order_secure))
             )
             
             // Tickers: Real-time prices via CCXT

@@ -91,6 +91,3 @@ pub struct DecryptedExchange {
     pub passphrase: Option<String>,
     pub is_active: bool,
 }
-
-// Representa um link de exchange no array (usado no service)
-pub use UserExchangeItem as ExchangeLink;

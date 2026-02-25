@@ -54,3 +54,7 @@ urlencoding = "2.1"
 # Async utilities
 async-trait = "0.1"
 
+# Swagger/OpenAPI Documentation
+utoipa = { version = "5", features = ["actix_extras"] }
+utoipa-swagger-ui = { version = "8", features = ["actix-web"] }
+

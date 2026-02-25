@@ -1,68 +1,142 @@
 use actix_web::{web, HttpResponse, Responder};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use crate::{
     services::order_service,
     models::{
         DecryptedExchange,
-        CreateOrderWithCredsRequest, CancelOrderWithCredsRequest,
+        CreateOrderWithCredsRequest, 
+        CancelOrderWithCredsRequest,
     },
+    middleware::auth::Claims,
+    database::MongoDB,
 };
 
-// ==================== ZERO DATABASE ARCHITECTURE ====================
-// Orders operations via CCXT - NO MongoDB persistence needed
-// Credentials come from frontend (decrypted from IndexedDB/WatermelonDB)
+// ==================== ORDERS API - ZERO DATABASE ARCHITECTURE ====================
+// Orders são buscadas diretamente das exchanges via CCXT
+// Nenhuma persistência em MongoDB - apenas cache temporário se necessário
+// Credenciais vêm do MongoDB (descriptografadas) usando JWT
 
-/// 🆕 Request body para POST /orders/fetch (com credenciais do frontend)
-#[derive(Debug, Deserialize, Serialize)]
-pub struct FetchOrdersRequest {
-    pub exchanges: Vec<ExchangeCredentials>,
-}
+// ============================================================================
+// 📊 FETCH ORDERS - Buscar ordens abertas
+// ============================================================================
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ExchangeCredentials {
-    pub exchange_id: String,
-    pub ccxt_id: String,
-    pub name: String,
-    pub api_key: String,
-    pub api_secret: String,
-    pub passphrase: Option<String>,
-}
-
-/// 🆕 POST /api/v1/orders/fetch - Fetch orders from exchanges with credentials from frontend
-pub async fn fetch_orders_from_credentials(
-    body: web::Json<FetchOrdersRequest>,
+/// 🔒 POST /api/v1/orders/fetch/secure
+/// Busca orders usando JWT - credenciais vêm do MongoDB
+/// Body: vazio (user_id vem do JWT)
+pub async fn fetch_orders_secure(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
 ) -> impl Responder {
-    log::info!("📊 POST /orders/fetch - {} exchanges", body.exchanges.len());
+    let user_id = &user.sub;
     
-    // Converte para DecryptedExchange
-    let exchanges: Vec<DecryptedExchange> = body.exchanges.iter().map(|e| {
-        DecryptedExchange {
-            exchange_id: e.exchange_id.clone(),
-            ccxt_id: e.ccxt_id.clone(),
-            name: e.name.clone(),
-            api_key: e.api_key.clone(),
-            api_secret: e.api_secret.clone(),
-            passphrase: e.passphrase.clone(),
-            is_active: true,
+    log::info!("🔐 Fetching orders for user {}", user_id);
+    
+    // 1. Buscar exchanges do MongoDB (descriptografadas)
+    let exchanges = match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exs) => exs,
+        Err(e) => {
+            log::error!("❌ Error fetching exchanges: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Error fetching exchanges: {}", e)
+            }));
         }
-    }).collect();
+    };
     
+    if exchanges.is_empty() {
+        log::info!("⚠️ No exchanges found for user {}", user_id);
+        return HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "orders": [],
+            "count": 0
+        }));
+    }
+    
+    log::info!("📊 Fetching orders from {} exchanges", exchanges.len());
+    
+    // 2. Buscar orders via CCXT
     match order_service::fetch_orders_from_exchanges(exchanges).await {
-        Ok(response) => HttpResponse::Ok().json(response),
-        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
-            "success": false,
-            "error": e
-        }))
+        Ok(response) => {
+            log::info!("✅ Fetched {} orders", response.count);
+            HttpResponse::Ok().json(response)
+        }
+        Err(e) => {
+            log::error!("❌ Error fetching orders: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
     }
 }
 
-/// 🆕 POST /api/v1/orders/create-with-creds - Create order com credenciais do frontend
-pub async fn create_order_with_creds(
-    request: web::Json<CreateOrderWithCredsRequest>,
+// ============================================================================
+// ➕ CREATE ORDER - Criar nova ordem
+// ============================================================================
+
+/// 🔒 POST /api/v1/orders/create
+/// Cria ordem usando JWT - credenciais vêm do MongoDB
+#[derive(Debug, Deserialize)]
+pub struct CreateOrderRequest {
+    pub exchange_id: String,     // MongoDB ID da exchange
+    pub symbol: String,           // Ex: "BTC/USDT"
+    pub order_type: String,       // "market" ou "limit"
+    pub side: String,             // "buy" ou "sell"
+    pub amount: f64,              // Quantidade
+    pub price: Option<f64>,       // Preço (obrigatório para limit orders)
+}
+
+pub async fn create_order_secure(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+    request: web::Json<CreateOrderRequest>,
 ) -> impl Responder {
-    log::info!("🛒 Creating order with frontend credentials");
+    let user_id = &user.sub;
     
-    match order_service::create_order_with_creds(&request).await {
+    log::info!("🔒 Creating {} {} order for {} on exchange {}", 
+        request.side, request.order_type, request.symbol, request.exchange_id);
+    
+    // 1. Buscar exchanges do MongoDB
+    let exchanges = match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exs) => exs,
+        Err(e) => {
+            log::error!("❌ Error fetching exchanges: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Error fetching exchanges: {}", e)
+            }));
+        }
+    };
+    
+    // 2. Encontrar a exchange específica
+    let exchange = match exchanges.iter().find(|ex| ex.exchange_id == request.exchange_id) {
+        Some(ex) => ex,
+        None => {
+            log::error!("❌ Exchange not found: {}", request.exchange_id);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": format!("Exchange not found: {}", request.exchange_id)
+            }));
+        }
+    };
+    
+    log::info!("✅ Found exchange {} ({})", exchange.name, exchange.ccxt_id);
+    
+    // 3. Criar ordem via CCXT
+    let create_request = CreateOrderWithCredsRequest {
+        ccxt_id: exchange.ccxt_id.clone(),
+        exchange_name: exchange.name.clone(),
+        api_key: exchange.api_key.clone(),
+        api_secret: exchange.api_secret.clone(),
+        passphrase: exchange.passphrase.clone(),
+        symbol: request.symbol.clone(),
+        order_type: request.order_type.clone(),
+        side: request.side.clone(),
+        amount: request.amount,
+        price: request.price,
+    };
+    
+    match order_service::create_order_with_creds(&create_request).await {
         Ok(response) => {
             if response.success {
                 log::info!("✅ Order created successfully");
@@ -82,13 +156,67 @@ pub async fn create_order_with_creds(
     }
 }
 
-/// 🆕 POST /api/v1/orders/cancel-with-creds - Cancel order com credenciais do frontend
-pub async fn cancel_order_with_creds(
-    request: web::Json<CancelOrderWithCredsRequest>,
+// ============================================================================
+// ❌ CANCEL ORDER - Cancelar ordem
+// ============================================================================
+
+/// 🔒 POST /api/v1/orders/cancel
+/// Cancela ordem usando JWT - credenciais vêm do MongoDB
+#[derive(Debug, Deserialize)]
+pub struct CancelOrderRequest {
+    pub exchange_id: String,  // MongoDB ID da exchange
+    pub symbol: String,       // Par de negociação
+    pub order_id: String,     // ID da ordem
+}
+
+pub async fn cancel_order_secure(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+    request: web::Json<CancelOrderRequest>,
 ) -> impl Responder {
-    log::info!("🚫 Canceling order with frontend credentials");
+    let user_id = &user.sub;
     
-    match order_service::cancel_order_with_creds(&request).await {
+    log::info!("🔒 Canceling order {} for {} on exchange {}", 
+        request.order_id, request.symbol, request.exchange_id);
+    
+    // 1. Buscar exchanges do MongoDB
+    let exchanges = match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exs) => exs,
+        Err(e) => {
+            log::error!("❌ Error fetching exchanges: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Error fetching exchanges: {}", e)
+            }));
+        }
+    };
+    
+    // 2. Encontrar a exchange específica
+    let exchange = match exchanges.iter().find(|ex| ex.exchange_id == request.exchange_id) {
+        Some(ex) => ex,
+        None => {
+            log::error!("❌ Exchange not found: {}", request.exchange_id);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": format!("Exchange not found: {}", request.exchange_id)
+            }));
+        }
+    };
+    
+    log::info!("✅ Found exchange {} ({})", exchange.name, exchange.ccxt_id);
+    
+    // 3. Cancelar ordem via CCXT
+    let cancel_request = CancelOrderWithCredsRequest {
+        ccxt_id: exchange.ccxt_id.clone(),
+        exchange_name: exchange.name.clone(),
+        api_key: exchange.api_key.clone(),
+        api_secret: exchange.api_secret.clone(),
+        passphrase: exchange.passphrase.clone(),
+        symbol: Some(request.symbol.clone()),
+        order_id: request.order_id.clone(),
+    };
+    
+    match order_service::cancel_order_with_creds(&cancel_request).await {
         Ok(response) => {
             if response.success {
                 log::info!("✅ Order canceled successfully");

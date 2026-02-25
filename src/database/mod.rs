@@ -46,7 +46,6 @@ impl MongoDB {
     /// Creates necessary indexes for optimal query performance
     async fn ensure_indexes(&self) -> Result<(), Box<dyn Error>> {
         use mongodb::bson::doc;
-        use mongodb::options::IndexOptions;
         use mongodb::IndexModel;
         
         log::info!("🔧 Creating database indexes...");

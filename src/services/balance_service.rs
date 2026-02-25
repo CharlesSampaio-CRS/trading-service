@@ -265,46 +265,188 @@ pub async fn fetch_balances_from_exchanges(
     })
 }
 
+/// 🚀 OTIMIZAÇÃO: Retorna timeout ideal baseado na performance histórica de cada exchange
+fn get_optimal_timeout(exchange_id: &str) -> std::time::Duration {
+    match exchange_id.to_lowercase().as_str() {
+        // Exchanges rápidas (Tier 1)
+        "binance" => std::time::Duration::from_secs(10),
+        "coinbase" => std::time::Duration::from_secs(12),
+        "kraken" => std::time::Duration::from_secs(12),
+        "okx" => std::time::Duration::from_secs(10),
+        
+        // Exchanges médias (Tier 2)
+        "bybit" => std::time::Duration::from_secs(20),
+        "kucoin" => std::time::Duration::from_secs(20),
+        "huobi" => std::time::Duration::from_secs(20),
+        "gateio" => std::time::Duration::from_secs(25),
+        
+        // Exchanges lentas (Tier 3)
+        "mexc" => std::time::Duration::from_secs(45),
+        "bitfinex" => std::time::Duration::from_secs(30),
+        "bitmart" => std::time::Duration::from_secs(35),
+        
+        // Default para exchanges desconhecidas
+        _ => std::time::Duration::from_secs(25),
+    }
+}
+
 async fn fetch_exchange_balance(exchange: DecryptedExchange) -> Result<ExchangeBalance, String> {
+    fetch_exchange_balance_with_retry(exchange, 3).await
+}
+
+async fn fetch_exchange_balance_with_retry(exchange: DecryptedExchange, max_retries: u32) -> Result<ExchangeBalance, String> {
     log::debug!("Fetching balance for exchange: {} ({})", exchange.name, exchange.ccxt_id);
     
-    // ⏱️ Timeout aumentado para 60s (exchanges lentas como MEXC)
-    let timeout_duration = std::time::Duration::from_secs(60);
+    // 🚀 OTIMIZAÇÃO: Timeout adaptativo baseado na exchange
+    let timeout_duration = get_optimal_timeout(&exchange.ccxt_id);
+    log::debug!("⏱️ [{}] Using adaptive timeout: {:?}", exchange.name, timeout_duration);
     
     let exchange_name = exchange.name.clone();
     let exchange_id = exchange.exchange_id.clone();
+    let is_mexc = exchange.ccxt_id.to_lowercase() == "mexc";
     
-    // 🚀 FASE 3: Usa thread pool dedicado ao invés de tokio::spawn_blocking
-    let balance_task = spawn_ccxt_blocking(move || {
-        let client = CCXTClient::new(
-            &exchange.ccxt_id,
-            &exchange.api_key,
-            &exchange.api_secret,
-            exchange.passphrase.as_deref(),
-        )?;
-        
-        client.fetch_balance_sync()
-    });
+    let mut final_result = None;
     
-    // Apply timeout
-    let balances_result = match tokio::time::timeout(timeout_duration, balance_task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => return Err(format!("Task error: {}", e)),
-        Err(_) => {
-            log::warn!("⏱️ Timeout fetching balance from {} after 60s", exchange_name);
-            return Ok(ExchangeBalance {
-                exchange: exchange_name.clone(),
-                exchange_id: exchange_id.clone(),
-                success: false,
-                error: Some("Request timeout after 60s".to_string()),
-                balances: HashMap::new(),
-                total_usd: 0.0,
-            });
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            // Backoff exponencial: 1s, 2s, 4s
+            let delay_ms = 1000 * (2_u64.pow(attempt - 1));
+            log::info!("🔄 Retry #{} for {} after {}ms delay", attempt + 1, exchange_name, delay_ms);
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
-    };
     
+        let exchange_clone = DecryptedExchange {
+            exchange_id: exchange.exchange_id.clone(),
+            ccxt_id: exchange.ccxt_id.clone(),
+            name: exchange.name.clone(),
+            api_key: exchange.api_key.clone(),
+            api_secret: exchange.api_secret.clone(),
+            passphrase: exchange.passphrase.clone(),
+            is_active: exchange.is_active,
+        };
+    
+        // 🚀 FASE 3: Usa thread pool dedicado ao invés de tokio::spawn_blocking
+        let balance_task = spawn_ccxt_blocking(move || {
+            let client = CCXTClient::new(
+                &exchange_clone.ccxt_id,
+                &exchange_clone.api_key,
+                &exchange_clone.api_secret,
+                exchange_clone.passphrase.as_deref(),
+            )?;
+            
+            client.fetch_balance_sync()
+        });
+        
+        // Apply timeout
+        let balances_result = match tokio::time::timeout(timeout_duration, balance_task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => return Err(format!("Task error: {}", e)),
+            Err(_) => {
+                log::warn!("⏱️ Timeout fetching balance from {} after 60s", exchange_name);
+                return Ok(ExchangeBalance {
+                    exchange: exchange_name.clone(),
+                    exchange_id: exchange_id.clone(),
+                    success: false,
+                    error: Some("Request timeout after 60s".to_string()),
+                    balances: HashMap::new(),
+                    total_usd: 0.0,
+                });
+            }
+        };
+        
+        match &balances_result {
+            Err(e) => {
+                let error_str = e.to_string();
+                // 🔄 Retry only for nonce/timestamp errors (especially MEXC)
+                let is_nonce_error = error_str.contains("InvalidNonce") || 
+                                    error_str.contains("recvWindow") ||
+                                    error_str.contains("Timestamp");
+                
+                if is_nonce_error && attempt < max_retries - 1 {
+                    log::warn!("⚠️  [{}] Nonce error (attempt {}/{}): {}", 
+                        exchange_name, attempt + 1, max_retries, error_str);
+                    continue; // Retry
+                }
+                
+                // 🔄 For network errors, retry only MEXC (known to be flaky)
+                let is_network_error = error_str.contains("NetworkError");
+                if is_network_error && is_mexc && attempt < max_retries - 1 {
+                    log::warn!("⚠️  [{}] Network error (attempt {}/{}): {}", 
+                        exchange_name, attempt + 1, max_retries, error_str);
+                    continue; // Retry
+                }
+                
+                // No more retries or non-retryable error
+                log::error!("Failed to fetch balance from {}: {}", exchange_name, e);
+                return Ok(ExchangeBalance {
+                    exchange: exchange_name.clone(),
+                    exchange_id: exchange_id.clone(),
+                    success: false,
+                    error: Some(error_str),
+                    balances: HashMap::new(),
+                    total_usd: 0.0,
+                });
+            }
+            Ok(_) => {
+                // Success! Save and break
+                final_result = Some(balances_result);
+                break;
+            }
+        }
+    }
+    
+    // Process successful result
+    let balances_result = final_result.expect("Should have result after retry loop");
     match balances_result {
-        Ok(balances) => {
+        Ok(mut balances) => {
+            // 🚀 OTIMIZAÇÃO: BATCH CONVERSION - Busca todas taxas em 1 chamada ao invés de N
+            let fiat_currencies = vec!["BRL", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF"];
+            
+            // Identifica quais moedas fiduciárias precisam de conversão
+            let currencies_to_convert: Vec<&str> = fiat_currencies.iter()
+                .filter(|&&currency| {
+                    if let Some(balance) = balances.get(currency) {
+                        balance.usd_value.is_none() && balance.total > 0.0
+                    } else {
+                        false
+                    }
+                })
+                .copied()
+                .collect();
+            
+            // 🚀 Se houver moedas para converter, busca TODAS de uma vez
+            if !currencies_to_convert.is_empty() {
+                log::debug!("🌍 [{}] Batch converting {} currencies to USD: {:?}", 
+                    exchange_name, currencies_to_convert.len(), currencies_to_convert);
+                
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(2000),
+                    crate::services::exchange_rate_service::get_batch_exchange_rates(currencies_to_convert.clone(), "USD")
+                ).await {
+                    Ok(Ok(rates)) => {
+                        log::info!("✅ [{}] Batch fetched {} exchange rates", exchange_name, rates.len());
+                        
+                        // Aplica taxas a todos os balances
+                        for currency in currencies_to_convert {
+                            if let Some(balance) = balances.get_mut(currency) {
+                                if let Some(&rate) = rates.get(&currency.to_uppercase()) {
+                                    let usd_value = balance.total * rate;
+                                    balance.usd_value = Some(usd_value);
+                                    log::debug!("🌍 [{}] {}: {} × {:.6} = ${:.2}", 
+                                        exchange_name, currency, balance.total, rate, usd_value);
+                                }
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("⚠️  [{}] Batch rate fetch failed: {}", exchange_name, e);
+                    }
+                    Err(_) => {
+                        log::warn!("⚠️  [{}] Batch rate fetch timeout", exchange_name);
+                    }
+                }
+            }
+            
             let mut total_usd: f64 = balances.values().map(|b| b.usd_value.unwrap_or(0.0)).sum();
             
             // 🚀 FASE 2: Lazy conversion - spawna task apenas se for NovaDAX
@@ -314,7 +456,7 @@ async fn fetch_exchange_balance(exchange: DecryptedExchange) -> Result<ExchangeB
                 // Spawna task em paralelo (não bloqueia)
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(500),
-                    crate::services::exchange_rate_service::get_exchange_rate_cached("BRL", "USD")
+                    crate::services::exchange_rate_service::get_exchange_rate("BRL", "USD")
                 ).await {
                     Ok(Ok(rate)) => {
                         let original_total = total_usd;
@@ -421,8 +563,8 @@ pub struct MarketMoversResponse {
 }
 
 pub async fn get_market_movers(
-    db: &MongoDB,
-    user_id: &str,
+    _db: &MongoDB,
+    _user_id: &str,
 ) -> Result<MarketMoversResponse, String> {
     // Simplified implementation - would need ticker data
     Ok(MarketMoversResponse {
@@ -574,24 +716,6 @@ pub async fn get_daily_pnl(
             pnl_usd,
             pnl_percent,
         },
-    })
-}
-
-// Clear balance cache
-#[derive(serde::Serialize)]
-pub struct ClearCacheResponse {
-    pub success: bool,
-    pub message: String,
-}
-
-pub async fn clear_balance_cache(
-    db: &MongoDB,
-    user_id: &str,
-) -> Result<ClearCacheResponse, String> {
-    // Simplified - would clear Redis/cache layer
-    Ok(ClearCacheResponse {
-        success: true,
-        message: "Cache cleared successfully".to_string(),
     })
 }
 

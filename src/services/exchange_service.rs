@@ -9,14 +9,14 @@ use crate::{
 use mongodb::bson::{doc, oid::ObjectId};
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AvailableExchangesResponse {
     pub success: bool,
     pub exchanges: Vec<ExchangeCatalogInfo>,
     pub count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ExchangeCatalogInfo {
     #[serde(rename = "_id")]
     pub id: String,
@@ -92,7 +92,7 @@ pub async fn get_token_details(
     exchange_id: &str,
     symbol: &str,
 ) -> Result<serde_json::Value, String> {
-    use crate::models::user_exchange::{UserExchanges, UserExchangeItem};
+    use crate::models::user_exchange::UserExchanges;
     use crate::models::ExchangeCatalog;
     use crate::utils::crypto::decrypt_fernet_via_python;
     use crate::utils::thread_pool::spawn_ccxt_blocking;

@@ -7,6 +7,20 @@ pub struct TokenSearchQuery {
     pub q: String,
 }
 
+// POST body for token search with exchange credentials (single exchange)
+#[derive(Debug, Deserialize)]
+pub struct TokenSearchWithCredsRequest {
+    pub query: String,
+    pub exchange: token_service::ExchangeCredentials,
+}
+
+// POST body for multi-exchange token details comparison
+#[derive(Debug, Deserialize)]
+pub struct TokenDetailsMultiRequest {
+    pub symbol: String,
+    pub exchanges: Vec<token_service::ExchangeCredentials>,
+}
+
 #[derive(Deserialize)]
 pub struct AvailableTokensQuery {
     pub exchange_id: String,
@@ -19,6 +33,19 @@ pub struct AvailableTokensByCcxtIdQuery {
     pub quote: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/tokens",
+    tag = "Tokens",
+    responses(
+        (status = 200, description = "List of all tokens"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 pub async fn get_tokens(
     db: web::Data<MongoDB>,
 ) -> HttpResponse {
@@ -69,6 +96,22 @@ pub async fn get_token(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/tokens/search",
+    tag = "Tokens",
+    params(
+        ("q" = String, Query, description = "Search query")
+    ),
+    responses(
+        (status = 200, description = "Search results"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
 pub async fn search_tokens(
     db: web::Data<MongoDB>,
     query: web::Query<TokenSearchQuery>,
@@ -216,6 +259,73 @@ pub async fn get_token_details_with_creds(
         }
         Err(e) => {
             log::error!("❌ Failed to get token details: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+    }
+}
+
+// ============================================================================
+// TOKEN SEARCH WITH CREDENTIALS - LOCAL-FIRST PATTERN
+// ============================================================================
+// POST /tokens/search - Search tokens using exchange credentials from frontend
+pub async fn post_token_search(
+    body: web::Json<TokenSearchWithCredsRequest>,
+) -> HttpResponse {
+    let query = body.query.trim();
+    if query.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "Query cannot be empty"
+        }));
+    }
+
+    log::info!("🔍 POST /tokens/search - query: {}, exchange: {} ({})",
+        query, body.exchange.name, body.exchange.ccxt_id);
+
+    match token_service::search_tokens_with_creds(query, &body.exchange).await {
+        Ok(response) => {
+            log::info!("✅ Found {} tokens for '{}' via {}", 
+                response.count, query, body.exchange.ccxt_id);
+            HttpResponse::Ok().json(response)
+        }
+        Err(e) => {
+            log::error!("❌ Token search failed: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+    }
+}
+
+// ============================================================================
+// MULTI-EXCHANGE TOKEN DETAILS - PRICE COMPARISON & ARBITRAGE
+// ============================================================================
+// POST /tokens/details/multi - Get token details from multiple exchanges simultaneously
+pub async fn get_token_details_multi(
+    body: web::Json<TokenDetailsMultiRequest>,
+) -> HttpResponse {
+    if body.exchanges.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": "At least one exchange is required"
+        }));
+    }
+
+    log::info!("🔍 POST /tokens/details/multi - symbol: {}, exchanges: {}",
+        body.symbol,
+        body.exchanges.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "));
+
+    match token_service::get_token_details_multi(&body.symbol, &body.exchanges).await {
+        Ok(response) => {
+            log::info!("✅ Retrieved {} from {} exchanges", body.symbol, response.exchanges.len());
+            HttpResponse::Ok().json(response)
+        }
+        Err(e) => {
+            log::error!("❌ Multi-exchange token details failed: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "success": false,
                 "error": e

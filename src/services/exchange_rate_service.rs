@@ -80,6 +80,63 @@ pub async fn get_exchange_rate(
     Ok(rate)
 }
 
+/// 🚀 OTIMIZAÇÃO: Busca múltiplas taxas de câmbio em uma única chamada
+/// Reduz N chamadas para 1 chamada (muito mais rápido!)
+pub async fn get_batch_exchange_rates(
+    from_currencies: Vec<&str>,
+    to: &str,
+) -> Result<HashMap<String, f64>, String> {
+    log::info!("💱 Fetching batch exchange rates: {:?} -> {}", from_currencies, to);
+
+    if from_currencies.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Busca todas as taxas a partir da moeda destino
+    let url = format!("{}/{}", EXCHANGERATE_API_BASE, to.to_uppercase());
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch batch exchange rates: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Exchange rate API error: {}", response.status()));
+    }
+
+    let rates_data: ExchangeRatesResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse exchange rates: {}", e))?;
+
+    // Extrai apenas as moedas solicitadas e inverte a taxa (FROM/TO ao invés de TO/FROM)
+    let mut result = HashMap::new();
+    for currency in from_currencies {
+        let currency_upper = currency.to_uppercase();
+        
+        // Se moeda de origem == moeda destino, taxa = 1.0
+        if currency_upper == to.to_uppercase() {
+            result.insert(currency_upper.clone(), 1.0);
+            continue;
+        }
+        
+        if let Some(&rate) = rates_data.rates.get(&currency_upper) {
+            // Inverte a taxa: se 1 USD = 5.5 BRL, então 1 BRL = 1/5.5 USD
+            let inverted_rate = 1.0 / rate;
+            result.insert(currency_upper.clone(), inverted_rate);
+            log::debug!("💱 {}/{}: {:.6}", currency, to, inverted_rate);
+        }
+    }
+
+    log::info!("✅ Fetched {} batch exchange rates to {}", result.len(), to);
+
+    Ok(result)
+}
+
 /// Converte um valor de uma moeda para outra
 pub async fn convert_currency(
     from: &str,
@@ -151,58 +208,6 @@ pub async fn brl_to_usd(amount_brl: f64) -> Result<f64, String> {
 pub async fn usd_to_brl(amount_usd: f64) -> Result<f64, String> {
     let rate = get_exchange_rate("USD", "BRL").await?;
     Ok(amount_usd * rate)
-}
-
-/// Cache de taxas de câmbio (em memória)
-use std::sync::Mutex;
-use lazy_static::lazy_static;
-
-#[derive(Debug, Clone)]
-struct CachedRate {
-    rate: f64,
-    timestamp: std::time::Instant,
-}
-
-lazy_static! {
-    static ref RATE_CACHE: Mutex<HashMap<String, CachedRate>> = Mutex::new(HashMap::new());
-}
-
-const CACHE_TTL_SECONDS: u64 = 3600; // 1 hora
-
-/// Busca taxa com cache (1 hora de TTL)
-pub async fn get_exchange_rate_cached(
-    from: &str,
-    to: &str,
-) -> Result<f64, String> {
-    let cache_key = format!("{}_{}", from.to_uppercase(), to.to_uppercase());
-    
-    // Tenta buscar do cache
-    {
-        let cache = RATE_CACHE.lock().unwrap();
-        if let Some(cached) = cache.get(&cache_key) {
-            let elapsed = cached.timestamp.elapsed().as_secs();
-            if elapsed < CACHE_TTL_SECONDS {
-                log::debug!("📦 Using cached rate for {}: {:.4} (age: {}s)", 
-                    cache_key, cached.rate, elapsed);
-                return Ok(cached.rate);
-            }
-        }
-    }
-    
-    // Busca nova taxa
-    let rate = get_exchange_rate(from, to).await?;
-    
-    // Atualiza cache
-    {
-        let mut cache = RATE_CACHE.lock().unwrap();
-        cache.insert(cache_key.clone(), CachedRate {
-            rate,
-            timestamp: std::time::Instant::now(),
-        });
-        log::debug!("💾 Cached rate for {}: {:.4}", cache_key, rate);
-    }
-    
-    Ok(rate)
 }
 
 #[cfg(test)]

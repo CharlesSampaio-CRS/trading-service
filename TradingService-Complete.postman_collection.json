@@ -1,0 +1,1253 @@
+{
+	"info": {
+		"_postman_id": "trading-service-complete-collection",
+		"name": "Trading Service - Complete API",
+		"description": "Coleção completa com TODOS os endpoints do Trading Service API v1\n\n**Base URL**: http://54.207.76.47:3002\n\n**Autenticação**: JWT Bearer Token (obtido via /auth/login ou /auth/register)",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{jwt_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://54.207.76.47:3002",
+			"type": "string"
+		},
+		{
+			"key": "jwt_token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "user_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "exchange_id",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "🔧 System",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": ["{{base_url}}"],
+							"path": ["health"]
+						},
+						"description": "Verifica se o serviço está online e funcionando"
+					}
+				},
+				{
+					"name": "Get Metrics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/metrics",
+							"host": ["{{base_url}}"],
+							"path": ["metrics"]
+						},
+						"description": "Obtém métricas do sistema (Prometheus format)"
+					}
+				}
+			],
+			"description": "Endpoints de sistema e monitoramento"
+		},
+		{
+			"name": "🔐 Authentication",
+			"item": [
+				{
+					"name": "Register",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200 || pm.response.code === 201) {",
+									"    var jsonData = pm.response.json();",
+									"    if (jsonData.token) {",
+									"        pm.collectionVariables.set(\"jwt_token\", jsonData.token);",
+									"        pm.collectionVariables.set(\"user_id\", jsonData.user.id);",
+									"        console.log(\"JWT Token saved:\", jsonData.token);",
+									"    }",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"senha123\",\n  \"name\": \"Test User\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/register",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "register"]
+						},
+						"description": "Registra novo usuário no sistema"
+					}
+				},
+				{
+					"name": "Login",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var jsonData = pm.response.json();",
+									"    if (jsonData.token) {",
+									"        pm.collectionVariables.set(\"jwt_token\", jsonData.token);",
+									"        pm.collectionVariables.set(\"user_id\", jsonData.user.id);",
+									"        console.log(\"JWT Token saved:\", jsonData.token);",
+									"    }",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"senha123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/login",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "login"]
+						},
+						"description": "Autentica usuário e retorna JWT token"
+					}
+				},
+				{
+					"name": "Refresh Token",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh_token\": \"your_refresh_token\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/refresh",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "refresh"]
+						},
+						"description": "Renova o JWT token usando refresh token"
+					}
+				},
+				{
+					"name": "Verify Token",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/verify",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "verify"]
+						},
+						"description": "Verifica se o JWT token é válido"
+					}
+				},
+				{
+					"name": "Get Me",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/me",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "me"]
+						},
+						"description": "Obtém informações do usuário autenticado"
+					}
+				},
+				{
+					"name": "Google Auth",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/google",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "google"]
+						},
+						"description": "Inicia autenticação via Google OAuth"
+					}
+				},
+				{
+					"name": "Google Callback",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/callback?code=",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "callback"],
+							"query": [
+								{
+									"key": "code",
+									"value": ""
+								}
+							]
+						},
+						"description": "Callback do Google OAuth"
+					}
+				},
+				{
+					"name": "Delete Account",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/delete-account",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "auth", "delete-account"]
+						},
+						"description": "Deleta conta do usuário autenticado"
+					}
+				}
+			],
+			"description": "Endpoints de autenticação e gerenciamento de usuários"
+		},
+		{
+			"name": "📊 Exchanges Catalog",
+			"item": [
+				{
+					"name": "Get Available Exchanges",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/exchanges/available",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "exchanges", "available"]
+						},
+						"description": "Lista todas exchanges disponíveis no catálogo"
+					}
+				},
+				{
+					"name": "Get Token Details",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/exchanges/:exchange_id/token/:symbol?user_id={{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "exchanges", ":exchange_id", "token", ":symbol"],
+							"query": [
+								{
+									"key": "user_id",
+									"value": "{{user_id}}"
+								}
+							],
+							"variable": [
+								{
+									"key": "exchange_id",
+									"value": "{{exchange_id}}"
+								},
+								{
+									"key": "symbol",
+									"value": "BTC"
+								}
+							]
+						},
+						"description": "Busca detalhes de um token específico via CCXT"
+					}
+				}
+			],
+			"description": "Catálogo de exchanges disponíveis"
+		},
+		{
+			"name": "🪙 Tokens Catalog",
+			"item": [
+				{
+					"name": "Get All Tokens",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens"]
+						},
+						"description": "Lista todos os tokens do catálogo"
+					}
+				},
+				{
+					"name": "Get Available Tokens",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens/available",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens", "available"]
+						},
+						"description": "Lista tokens disponíveis"
+					}
+				},
+				{
+					"name": "Get Tokens by CCXT",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens/by-ccxt?ccxt_id=binance",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens", "by-ccxt"],
+							"query": [
+								{
+									"key": "ccxt_id",
+									"value": "binance"
+								}
+							]
+						},
+						"description": "Lista tokens por CCXT ID"
+					}
+				},
+				{
+					"name": "Search Tokens (GET)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens/search?query=BTC",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens", "search"],
+							"query": [
+								{
+									"key": "query",
+									"value": "BTC"
+								}
+							]
+						},
+						"description": "Busca tokens por nome ou símbolo"
+					}
+				},
+				{
+					"name": "Search Tokens (POST - with credentials)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"query\": \"BTC\",\n  \"ccxt_id\": \"binance\",\n  \"api_key\": \"your_api_key\",\n  \"api_secret\": \"your_api_secret\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens/search",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens", "search"]
+						},
+						"description": "Busca tokens com credenciais (local-first)"
+					}
+				},
+				{
+					"name": "Get Token Details (POST - with credentials)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"symbol\": \"BTC\",\n  \"ccxt_id\": \"binance\",\n  \"api_key\": \"your_api_key\",\n  \"api_secret\": \"your_api_secret\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens/details",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens", "details"]
+						},
+						"description": "Busca detalhes do token com credenciais (zero database)"
+					}
+				},
+				{
+					"name": "Get Token Details Multi-Exchange",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"symbol\": \"BTC\",\n  \"exchanges\": [\n    {\n      \"ccxt_id\": \"binance\",\n      \"api_key\": \"key1\",\n      \"api_secret\": \"secret1\"\n    },\n    {\n      \"ccxt_id\": \"mexc\",\n      \"api_key\": \"key2\",\n      \"api_secret\": \"secret2\"\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens/details/multi",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens", "details", "multi"]
+						},
+						"description": "Compara preços de um token em múltiplas exchanges"
+					}
+				},
+				{
+					"name": "Get Token by Symbol",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/tokens/:symbol",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tokens", ":symbol"],
+							"variable": [
+								{
+									"key": "symbol",
+									"value": "BTC"
+								}
+							]
+						},
+						"description": "Busca token específico por símbolo"
+					}
+				}
+			],
+			"description": "Catálogo global de tokens"
+		},
+		{
+			"name": "🔗 User Exchanges (com validação)",
+			"item": [
+				{
+					"name": "Add Exchange (with validation)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    var jsonData = pm.response.json();",
+									"    if (jsonData.exchange_id) {",
+									"        pm.collectionVariables.set(\"exchange_id\", jsonData.exchange_id);",
+									"        console.log(\"Exchange ID saved:\", jsonData.exchange_id);",
+									"    }",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"exchange_type\": \"binance\",\n  \"api_key\": \"your_api_key\",\n  \"api_secret\": \"your_api_secret\",\n  \"passphrase\": null\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/user/exchanges",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "user", "exchanges"]
+						},
+						"description": "✨ Conecta exchange COM VALIDAÇÃO AUTOMÁTICA:\n- ✅ Testa conexão real\n- ✅ Verifica permissões (Read/Trade/Withdraw)\n- ❌ REJEITA se tiver permissão de Withdrawal\n- ✅ Valida rate limits\n- ✅ Salva apenas se tudo estiver OK"
+					}
+				},
+				{
+					"name": "List User Exchanges",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/user/exchanges",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "user", "exchanges"]
+						},
+						"description": "Lista todas exchanges conectadas pelo usuário"
+					}
+				},
+				{
+					"name": "Update Exchange",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"is_active\": true,\n  \"api_key\": \"new_api_key\",\n  \"api_secret\": \"new_api_secret\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/user/exchanges/:exchange_id",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "user", "exchanges", ":exchange_id"],
+							"variable": [
+								{
+									"key": "exchange_id",
+									"value": "{{exchange_id}}"
+								}
+							]
+						},
+						"description": "Atualiza exchange conectada (credenciais ou status)"
+					}
+				},
+				{
+					"name": "Delete Exchange",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/user/exchanges/:exchange_id",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "user", "exchanges", ":exchange_id"],
+							"variable": [
+								{
+									"key": "exchange_id",
+									"value": "{{exchange_id}}"
+								}
+							]
+						},
+						"description": "Remove exchange conectada"
+					}
+				}
+			],
+			"description": "🔐 Gerenciamento de exchanges do usuário (com validação de segurança)"
+		},
+		{
+			"name": "💰 Balances",
+			"item": [
+				{
+					"name": "Get Balances (GET)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/balances?user_id={{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "balances"],
+							"query": [
+								{
+									"key": "user_id",
+									"value": "{{user_id}}"
+								}
+							]
+						},
+						"description": "Busca saldos de todas exchanges do usuário"
+					}
+				},
+				{
+					"name": "Get Balances (POST - with credentials)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"exchanges\": [\n    {\n      \"ccxt_id\": \"binance\",\n      \"api_key\": \"your_api_key\",\n      \"api_secret\": \"your_api_secret\"\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/balances",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "balances"]
+						},
+						"description": "Busca saldos enviando credenciais (zero database)"
+					}
+				},
+				{
+					"name": "Get Balances Secure (JWT)",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/balances/secure",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "balances", "secure"]
+						},
+						"description": "Busca saldos usando credenciais salvas (JWT required)"
+					}
+				},
+				{
+					"name": "Get Balance Summary",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/balances/summary?user_id={{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "balances", "summary"],
+							"query": [
+								{
+									"key": "user_id",
+									"value": "{{user_id}}"
+								}
+							]
+						},
+						"description": "Resumo consolidado de saldos (total em USD, BRL, etc)"
+					}
+				},
+				{
+					"name": "Get Exchange Balance",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/balances/exchange/:exchange_id?user_id={{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "balances", "exchange", ":exchange_id"],
+							"query": [
+								{
+									"key": "user_id",
+									"value": "{{user_id}}"
+								}
+							],
+							"variable": [
+								{
+									"key": "exchange_id",
+									"value": "{{exchange_id}}"
+								}
+							]
+						},
+						"description": "Saldos de uma exchange específica"
+					}
+				},
+				{
+					"name": "Get Market Movers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/balances/market-movers?user_id={{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "balances", "market-movers"],
+							"query": [
+								{
+									"key": "user_id",
+									"value": "{{user_id}}"
+								}
+							]
+						},
+						"description": "Top ganhos e perdas do dia no portfólio"
+					}
+				}
+			],
+			"description": "Saldos em tempo real via CCXT"
+		},
+		{
+			"name": "📈 Orders",
+			"item": [
+				{
+					"name": "Fetch Orders (with credentials)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"ccxt_id\": \"binance\",\n  \"api_key\": \"your_api_key\",\n  \"api_secret\": \"your_api_secret\",\n  \"symbol\": \"BTC/USDT\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/orders/fetch",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "orders", "fetch"]
+						},
+						"description": "Busca ordens abertas enviando credenciais"
+					}
+				},
+				{
+					"name": "Fetch Orders Secure (JWT)",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"exchange_id\": \"{{exchange_id}}\",\n  \"symbol\": \"BTC/USDT\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/orders/fetch/secure",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "orders", "fetch", "secure"]
+						},
+						"description": "Busca ordens usando credenciais salvas (JWT)"
+					}
+				},
+				{
+					"name": "Create Order (with credentials)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"ccxt_id\": \"binance\",\n  \"api_key\": \"your_api_key\",\n  \"api_secret\": \"your_api_secret\",\n  \"symbol\": \"BTC/USDT\",\n  \"type\": \"limit\",\n  \"side\": \"buy\",\n  \"amount\": 0.001,\n  \"price\": 50000\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/orders/create-with-creds",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "orders", "create-with-creds"]
+						},
+						"description": "Cria ordem enviando credenciais (zero database)"
+					}
+				},
+				{
+					"name": "Cancel Order (with credentials)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"ccxt_id\": \"binance\",\n  \"api_key\": \"your_api_key\",\n  \"api_secret\": \"your_api_secret\",\n  \"order_id\": \"12345\",\n  \"symbol\": \"BTC/USDT\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/orders/cancel-with-creds",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "orders", "cancel-with-creds"]
+						},
+						"description": "Cancela ordem enviando credenciais"
+					}
+				}
+			],
+			"description": "Gerenciamento de ordens via CCXT (zero database)"
+		},
+		{
+			"name": "📊 Tickers",
+			"item": [
+				{
+					"name": "Get Tickers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/tickers?user_id={{user_id}}",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "tickers"],
+							"query": [
+								{
+									"key": "user_id",
+									"value": "{{user_id}}"
+								}
+							]
+						},
+						"description": "Preços em tempo real de todas exchanges do usuário"
+					}
+				}
+			],
+			"description": "Preços em tempo real via CCXT"
+		},
+		{
+			"name": "📸 Snapshots",
+			"item": [
+				{
+					"name": "Save Snapshot",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"balances\": [\n    {\n      \"exchange_id\": \"{{exchange_id}}\",\n      \"exchange_name\": \"Binance\",\n      \"assets\": [\n        {\n          \"symbol\": \"BTC\",\n          \"free\": 0.5,\n          \"locked\": 0.0,\n          \"total\": 0.5,\n          \"price_usd\": 50000\n        }\n      ]\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/snapshots/save",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "snapshots", "save"]
+						},
+						"description": "Salva snapshot diário de saldos para cálculo de PNL"
+					}
+				},
+				{
+					"name": "Get Snapshots",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/snapshots?start_date=2026-01-01&end_date=2026-12-31",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "snapshots"],
+							"query": [
+								{
+									"key": "start_date",
+									"value": "2026-01-01"
+								},
+								{
+									"key": "end_date",
+									"value": "2026-12-31"
+								}
+							]
+						},
+						"description": "Lista snapshots históricos do usuário"
+					}
+				}
+			],
+			"description": "Snapshots diários para cálculo de PNL"
+		},
+		{
+			"name": "🎯 Strategies",
+			"item": [
+				{
+					"name": "Get All Strategies",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/strategies",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "strategies"]
+						},
+						"description": "Lista todas estratégias do usuário"
+					}
+				},
+				{
+					"name": "Get Strategy by ID",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/strategies/:strategy_id",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "strategies", ":strategy_id"],
+							"variable": [
+								{
+									"key": "strategy_id",
+									"value": "strategy_id_here"
+								}
+							]
+						},
+						"description": "Busca estratégia específica"
+					}
+				},
+				{
+					"name": "Create Strategy",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"DCA Bitcoin\",\n  \"description\": \"Dollar Cost Averaging strategy\",\n  \"type\": \"DCA\",\n  \"parameters\": {\n    \"symbol\": \"BTC/USDT\",\n    \"amount\": 100,\n    \"interval\": \"daily\"\n  },\n  \"is_active\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/strategies",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "strategies"]
+						},
+						"description": "Cria nova estratégia de trading"
+					}
+				},
+				{
+					"name": "Update Strategy",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Updated Strategy Name\",\n  \"is_active\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/strategies/:strategy_id",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "strategies", ":strategy_id"],
+							"variable": [
+								{
+									"key": "strategy_id",
+									"value": "strategy_id_here"
+								}
+							]
+						},
+						"description": "Atualiza estratégia existente"
+					}
+				},
+				{
+					"name": "Delete Strategy",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{jwt_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/strategies/:strategy_id",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "strategies", ":strategy_id"],
+							"variable": [
+								{
+									"key": "strategy_id",
+									"value": "strategy_id_here"
+								}
+							]
+						},
+						"description": "Deleta estratégia"
+					}
+				}
+			],
+			"description": "Gerenciamento de estratégias de trading"
+		},
+		{
+			"name": "🌐 External APIs",
+			"item": [
+				{
+					"name": "CoinGecko - Get Token Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/token/info?symbol=bitcoin",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "external", "token", "info"],
+							"query": [
+								{
+									"key": "symbol",
+									"value": "bitcoin"
+								}
+							]
+						},
+						"description": "Busca informações de token via CoinGecko"
+					}
+				},
+				{
+					"name": "CoinGecko - Search Token",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/token/search?query=bitcoin",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "external", "token", "search"],
+							"query": [
+								{
+									"key": "query",
+									"value": "bitcoin"
+								}
+							]
+						},
+						"description": "Busca tokens no CoinGecko"
+					}
+				},
+				{
+					"name": "CoinGecko - Get Batch Prices",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/token/prices?symbols=bitcoin,ethereum",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "external", "token", "prices"],
+							"query": [
+								{
+									"key": "symbols",
+									"value": "bitcoin,ethereum"
+								}
+							]
+						},
+						"description": "Busca preços de múltiplos tokens via CoinGecko"
+					}
+				},
+				{
+					"name": "Exchange Rate - Get Rate",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/exchange-rate?from=USD&to=BRL",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "external", "exchange-rate"],
+							"query": [
+								{
+									"key": "from",
+									"value": "USD"
+								},
+								{
+									"key": "to",
+									"value": "BRL"
+								}
+							]
+						},
+						"description": "Taxa de câmbio entre moedas"
+					}
+				},
+				{
+					"name": "Exchange Rate - Convert",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/convert?from=USD&to=BRL&amount=100",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "external", "convert"],
+							"query": [
+								{
+									"key": "from",
+									"value": "USD"
+								},
+								{
+									"key": "to",
+									"value": "BRL"
+								},
+								{
+									"key": "amount",
+									"value": "100"
+								}
+							]
+						},
+						"description": "Converte valor entre moedas"
+					}
+				},
+				{
+					"name": "Exchange Rate - Get All Rates",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/rates?base=USD",
+							"host": ["{{base_url}}"],
+							"path": ["api", "v1", "external", "rates"],
+							"query": [
+								{
+									"key": "base",
+									"value": "USD"
+								}
+							]
+						},
+						"description": "Todas taxas de câmbio de uma moeda base"
+					}
+				}
+			],
+			"description": "Integrações com APIs externas (CoinGecko, Exchange Rates)"
+		}
+	]
+}

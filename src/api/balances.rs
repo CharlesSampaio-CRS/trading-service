@@ -1,6 +1,6 @@
-use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
-use crate::{database::MongoDB, services::balance_service};
+use crate::{database::MongoDB, services::balance_service, middleware::auth::Claims};
 
 #[derive(Debug, Deserialize)]
 pub struct BalanceQuery {
@@ -85,6 +85,56 @@ pub async fn post_balances(
         }
         Err(e) => {
             log::error!("❌ Error fetching balances from frontend credentials: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+    }
+}
+
+// /api/v1/balances/secure (POST) - ✅ SECURE VERSION - Fetch balances from MongoDB using JWT
+/// New secure endpoint that uses JWT to identify user and fetches credentials from MongoDB
+/// Body is EMPTY - user identification comes from JWT token
+pub async fn post_balances_secure(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    
+    log::info!("🔐 POST /balances/secure - user {} (from JWT)", user_id);
+    
+    // Buscar exchanges do MongoDB (já descriptografadas)
+    match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exchanges) => {
+            if exchanges.is_empty() {
+                log::warn!("⚠️ No exchanges found for user {}", user_id);
+                return HttpResponse::Ok().json(serde_json::json!({
+                    "success": true,
+                    "total_usd": 0.0,
+                    "exchanges": []
+                }));
+            }
+            
+            log::info!("📊 Fetching balances from {} exchanges", exchanges.len());
+            
+            // Chamar serviço de balance
+            match balance_service::fetch_balances_from_exchanges(exchanges).await {
+                Ok(response) => {
+                    log::info!("✅ Balances fetched: {} exchanges", response.exchanges.len());
+                    HttpResponse::Ok().json(response)
+                }
+                Err(e) => {
+                    log::error!("❌ Error fetching balances: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "success": false,
+                        "error": e
+                    }))
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("❌ Error fetching user exchanges: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "success": false,
                 "error": e

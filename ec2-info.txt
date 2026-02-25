@@ -1,0 +1,19 @@
+EC2 Instance Information
+========================
+Instance ID: i-04e216d9c323bd92b
+Public IP: 54.94.231.254
+Region: sa-east-1
+Type: t4g.small (ARM Graviton2)
+RAM: 2GB
+Storage: 8GB gp3
+Key File: trading-service-key.pem
+Security Group: sg-0b85633561e24aa27
+
+SSH Command:
+ssh -i trading-service-key.pem ubuntu@54.94.231.254
+
+Estimated Cost: ~$13-14 USD/month (São Paulo)
+
+💡 DICAS:
+   - Pare: aws ec2 stop-instances --instance-ids i-04e216d9c323bd92b --region sa-east-1
+   - Inicie: aws ec2 start-instances --instance-ids i-04e216d9c323bd92b --region sa-east-1

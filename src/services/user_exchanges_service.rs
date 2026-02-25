@@ -151,13 +151,33 @@ async fn validate_exchange_connection(
                 }
             });
         
-        // 🚨 BLOQUEAR SE TIVER PERMISSÃO DE WITHDRAWAL
+        // 🚨 VALIDAÇÃO DE SEGURANÇA DAS PERMISSÕES
+        // A key DEVE ter: Read + Trade (Spot)
+        // A key NÃO DEVE ter: Withdraw
+        
+        if !permissions.can_read {
+            log::error!("❌ API key cannot read balances - REJECTING!");
+            return Err(
+                "API key does not have Read permission. Please create an API key with Read and Spot Trade permissions enabled.".to_string()
+            );
+        }
+        
+        if !permissions.can_trade {
+            log::error!("❌ API key cannot trade - REJECTING!");
+            return Err(
+                "API key does not have Trade permission. Please create an API key with Read and Spot Trade permissions enabled.".to_string()
+            );
+        }
+        
         if permissions.can_withdraw {
             log::error!("❌ API key has withdrawal permissions - REJECTING for security!");
             return Err(
-                "API key has withdrawal permissions. For security reasons, please create a new API key with only Read and Trade permissions (disable Withdrawals).".to_string()
+                "API key has withdrawal permissions. For security reasons, please create a new API key with only Read and Spot Trade permissions (disable Withdrawals).".to_string()
             );
         }
+        
+        log::info!("✅ API key permissions validated: read={}, trade={}, withdraw={}", 
+            permissions.can_read, permissions.can_trade, permissions.can_withdraw);
         
         // 3. Obter informações de rate limit
         log::info!("🔍 Checking rate limits...");

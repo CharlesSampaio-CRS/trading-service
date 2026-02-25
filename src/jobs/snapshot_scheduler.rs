@@ -14,13 +14,26 @@ use chrono::{Utc, Timelike};
 use std::env;
 
 /// Inicia o scheduler de snapshots diários
-/// Roda a cada hora e verifica se é meia-noite UTC para salvar snapshots
+/// Roda a cada hora e garante que existe snapshot do dia para todos os usuários.
+/// Se o servidor reiniciar ou perder algum dia, o snapshot é criado no próximo tick.
+/// Cada `save_user_snapshot` já verifica se o snapshot de hoje existe antes de salvar.
 pub async fn start_daily_snapshot_scheduler(db: MongoDB) {
-    log::info!("📅 Starting daily snapshot scheduler (runs at 00:00 UTC)");
+    log::info!("📅 Starting daily snapshot scheduler (runs every hour, saves once per day)");
     
     // Spawn task em background
     tokio::spawn(async move {
-        // Intervalo de 1 hora
+        // 🔥 EXECUTA IMEDIATAMENTE na inicialização para garantir snapshot de hoje
+        log::info!("🚀 Running initial snapshot check on startup...");
+        match save_all_user_snapshots(&db).await {
+            Ok(count) => {
+                log::info!("✅ Startup snapshot check completed: {} users processed", count);
+            }
+            Err(e) => {
+                log::error!("❌ Startup snapshot check failed: {}", e);
+            }
+        }
+        
+        // Depois roda a cada hora
         let mut interval = interval(Duration::from_secs(3600)); // 1 hora
         
         loop {
@@ -28,23 +41,18 @@ pub async fn start_daily_snapshot_scheduler(db: MongoDB) {
             
             let now = Utc::now();
             let hour = now.hour();
-            let minute = now.minute();
             
-            // Executa apenas à meia-noite UTC (00:00 - 00:59)
-            if hour == 0 && minute < 10 {
-                log::info!("🌙 Midnight UTC detected! Running daily snapshot job...");
-                
-                match save_all_user_snapshots(&db).await {
-                    Ok(count) => {
-                        log::info!("✅ Daily snapshot job completed: {} users processed", count);
-                    }
-                    Err(e) => {
-                        log::error!("❌ Daily snapshot job failed: {}", e);
-                    }
+            // Executa a cada hora — save_user_snapshot já faz skip se já existe snapshot de hoje
+            // Preferimos rodar nas primeiras horas do dia UTC mas não falhamos se perder
+            log::debug!("⏰ Hourly snapshot check ({}:00 UTC)...", hour);
+            
+            match save_all_user_snapshots(&db).await {
+                Ok(count) => {
+                    log::debug!("✅ Hourly snapshot check: {} users processed", count);
                 }
-                
-                // Aguarda 1 hora para não rodar múltiplas vezes na mesma hora
-                tokio::time::sleep(Duration::from_secs(3600)).await;
+                Err(e) => {
+                    log::error!("❌ Hourly snapshot check failed: {}", e);
+                }
             }
         }
     });
@@ -193,7 +201,7 @@ async fn save_user_snapshot(db: &MongoDB, user_id: &str) -> Result<(), String> {
         "date": &today,
         "total_usd": encrypted_total_usd,
         "total_brl": encrypted_total_brl,
-        "timestamp": Utc::now().timestamp(),
+        "timestamp": Utc::now().timestamp_millis(),
         "exchanges": exchanges_details,
     };
     

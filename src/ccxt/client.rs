@@ -910,55 +910,88 @@ impl CCXTClient {
                 }
             }
             
-            // 2. Verificar permissões de trade
-            // Nota: Não vamos criar ordem real, apenas verificar se o método existe e é acessível
-            // Algumas exchanges retornam erro específico se não tem permissão
-            let can_create_order = self.exchange
-                .as_ref(py)
-                .getattr("has")
-                .ok()
-                .and_then(|has_dict| has_dict.downcast::<PyDict>().ok())
-                .and_then(|dict| dict.get_item("createOrder").ok().flatten())
-                .and_then(|v| v.extract::<bool>().ok())
-                .unwrap_or(false);
-            
-            if can_create_order {
-                // Tentar verificar através de fetch_open_orders (requer auth de trade)
-                match self.exchange.as_ref(py).call_method0("fetch_open_orders") {
-                    Ok(_) => {
+            // 2. Verificar permissões de trade (Spot)
+            // Testamos com fetch_open_orders que requer autenticação de trade
+            // Se falhar com erro de permissão = key não tem trade
+            // Se funcionar ou falhar por outro motivo = key tem trade
+            log::info!("🔍 Testing trade permission via fetch_open_orders...");
+            match self.exchange.as_ref(py).call_method0("fetch_open_orders") {
+                Ok(_) => {
+                    permissions.can_trade = true;
+                    log::info!("✅ Trade permission confirmed (fetch_open_orders succeeded)");
+                }
+                Err(e) => {
+                    let error_str = e.to_string().to_lowercase();
+                    // Se o erro é de permissão, a key não tem trade
+                    if error_str.contains("permission") || 
+                       error_str.contains("not allowed") ||
+                       error_str.contains("unauthorized") ||
+                       error_str.contains("forbidden") ||
+                       error_str.contains("denied") ||
+                       error_str.contains("trade") && error_str.contains("disabled") {
+                        permissions.can_trade = false;
+                        log::warn!("⚠️ Trade permission denied: {}", error_str);
+                    } else {
+                        // Outros erros (ex: "symbol required", "no orders", etc.) = tem permissão
                         permissions.can_trade = true;
-                        log::info!("✅ Trade permission confirmed");
-                    }
-                    Err(e) => {
-                        let error_str = e.to_string();
-                        // Se o erro não for de autenticação/permissão, considerar que tem permissão
-                        if !error_str.contains("permission") && 
-                           !error_str.contains("not allowed") &&
-                           !error_str.contains("unauthorized") &&
-                           !error_str.contains("forbidden") {
-                            permissions.can_trade = true;
-                            log::info!("✅ Trade permission assumed (no permission error)");
-                        } else {
-                            log::warn!("⚠️ Trade permission denied or restricted: {}", error_str);
-                        }
+                        log::info!("✅ Trade permission assumed (error is not permission-related): {}", error_str);
                     }
                 }
             }
             
             // 3. Verificar permissões de withdrawal
-            let can_withdraw = self.exchange
+            // IMPORTANTE: exchange.has['withdraw'] indica que a EXCHANGE suporta saques,
+            // NÃO que a API key tem permissão. Para verificar a permissão real da key,
+            // tentamos chamar fetchDepositAddress que requer permissão de withdraw.
+            // Se funcionar, a key tem permissão de withdraw (inseguro!).
+            // Se falhar com erro de permissão, a key não tem (seguro!).
+            let has_fetch_deposit_address = self.exchange
                 .as_ref(py)
                 .getattr("has")
                 .ok()
                 .and_then(|has_dict| has_dict.downcast::<PyDict>().ok())
-                .and_then(|dict| dict.get_item("withdraw").ok().flatten())
+                .and_then(|dict| dict.get_item("fetchDepositAddress").ok().flatten())
                 .and_then(|v| v.extract::<bool>().ok())
                 .unwrap_or(false);
             
-            if can_withdraw {
-                // Não vamos testar withdrawal real, apenas verificar se está disponível
-                permissions.can_withdraw = true;
-                log::warn!("⚠️ Withdrawal capability detected - API key has withdrawal permissions!");
+            if has_fetch_deposit_address {
+                // Tentar operação que requer permissão de withdraw para detectar se a key tem
+                log::info!("🔍 Testing withdrawal permission via fetchDepositAddress...");
+                let withdraw_test = self.exchange
+                    .as_ref(py)
+                    .call_method1("fetch_deposit_address", ("BTC",));
+                
+                match withdraw_test {
+                    Ok(_) => {
+                        // Se conseguiu buscar endereço de depósito, a key tem permissão de withdraw
+                        permissions.can_withdraw = true;
+                        log::warn!("⚠️ Withdrawal permission detected - API key can withdraw!");
+                    }
+                    Err(e) => {
+                        let error_str = e.to_string().to_lowercase();
+                        if error_str.contains("permission") || 
+                           error_str.contains("not allowed") ||
+                           error_str.contains("unauthorized") ||
+                           error_str.contains("forbidden") ||
+                           error_str.contains("denied") ||
+                           error_str.contains("apikey") ||
+                           error_str.contains("api key") {
+                            // Erro de permissão = key não tem withdraw (bom!)
+                            permissions.can_withdraw = false;
+                            log::info!("✅ No withdrawal permission detected (key is safe)");
+                        } else {
+                            // Outro tipo de erro (ex: moeda não suportada, rede, etc)
+                            // Não conseguimos determinar, assumir que NÃO tem (mais seguro)
+                            permissions.can_withdraw = false;
+                            log::info!("✅ Withdrawal permission unclear, assuming disabled (safe default): {}", error_str);
+                        }
+                    }
+                }
+            } else {
+                // Exchange não suporta fetchDepositAddress - não podemos testar
+                // Assumir que NÃO tem permissão (default seguro)
+                permissions.can_withdraw = false;
+                log::info!("✅ Cannot test withdrawal permission (no fetchDepositAddress), assuming disabled");
             }
             
             // 4. Verificar se há restrições de IP

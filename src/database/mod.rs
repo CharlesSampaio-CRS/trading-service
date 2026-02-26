@@ -74,6 +74,49 @@ impl MongoDB {
             Err(e) => log::debug!("   ℹ️  Index already exists: {}", e),
         }
         
+        // 🎯 Fase 2: Indexes for strategies collection
+        let strategies = self.database().collection::<mongodb::bson::Document>("strategies");
+        
+        // Index: strategies(user_id) - listar estratégias do usuário
+        let strategies_user_index = IndexModel::builder()
+            .keys(doc! { "user_id": 1 })
+            .build();
+        
+        match strategies.create_index(strategies_user_index).await {
+            Ok(_) => log::info!("   ✅ Index created: strategies(user_id)"),
+            Err(e) => log::debug!("   ℹ️  Index already exists: {}", e),
+        }
+        
+        // Index: strategies(user_id, status) - filtrar por status
+        let strategies_status_index = IndexModel::builder()
+            .keys(doc! { "user_id": 1, "status": 1 })
+            .build();
+        
+        match strategies.create_index(strategies_status_index).await {
+            Ok(_) => log::info!("   ✅ Index created: strategies(user_id, status)"),
+            Err(e) => log::debug!("   ℹ️  Index already exists: {}", e),
+        }
+        
+        // Index: strategies(user_id, is_active) - filtrar ativas/inativas
+        let strategies_active_index = IndexModel::builder()
+            .keys(doc! { "user_id": 1, "is_active": 1 })
+            .build();
+        
+        match strategies.create_index(strategies_active_index).await {
+            Ok(_) => log::info!("   ✅ Index created: strategies(user_id, is_active)"),
+            Err(e) => log::debug!("   ℹ️  Index already exists: {}", e),
+        }
+        
+        // Index: strategies(user_id, symbol) - buscar por par de trading
+        let strategies_symbol_index = IndexModel::builder()
+            .keys(doc! { "user_id": 1, "symbol": 1 })
+            .build();
+        
+        match strategies.create_index(strategies_symbol_index).await {
+            Ok(_) => log::info!("   ✅ Index created: strategies(user_id, symbol)"),
+            Err(e) => log::debug!("   ℹ️  Index already exists: {}", e),
+        }
+        
         log::info!("✅ Database indexes ready");
         
         Ok(())

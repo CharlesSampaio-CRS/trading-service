@@ -178,6 +178,17 @@ async fn main() -> std::io::Result<()> {
                     .service(api::strategies::delete_strategy)
             )
             
+            // Strategy Templates: Independent template management
+            .service(
+                web::scope("/api/v1/strategy-templates")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .service(api::strategy_templates::get_templates)
+                    .service(api::strategy_templates::get_template)
+                    .service(api::strategy_templates::create_template)
+                    .service(api::strategy_templates::update_template)
+                    .service(api::strategy_templates::delete_template)
+            )
+            
             // Balances: Real-time from exchanges via CCXT
             .service(
                 web::scope("/api/v1/balances")

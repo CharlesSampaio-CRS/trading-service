@@ -12,4 +12,6 @@ pub use order::*;
 pub use user_exchange::*;
 pub use tokens_cache::*;
 pub use strategy::*;
+// Re-export key types for backward compat
+// Strategy (old) is now StrategyItem + UserStrategies
 pub use strategy_template::*;

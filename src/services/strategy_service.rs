@@ -471,11 +471,24 @@ fn evaluate_entry_rules(strategy: &StrategyItem, price: f64, now: i64, signals: 
             let change = if let Some(last) = strategy.last_price {
                 if last > 0.0 { ((price - last) / last) * 100.0 } else { 0.0 }
             } else { 0.0 };
-            signals.push(StrategySignal {
-                signal_type: SignalType::Info, price,
-                message: format!("{} monitoring: {} @ {:.8} (delta {:.2}%)", strategy.strategy_type, strategy.symbol, price, change),
-                acted: false, price_change_percent: change, created_at: now,
-            });
+
+            // Se sem posicao e tem investimento configurado → entrada automatica
+            if strategy.position.is_none() && config.min_investment.unwrap_or(0.0) > 0.0 {
+                signals.push(StrategySignal {
+                    signal_type: SignalType::Buy, price,
+                    message: format!("{} entry: {} @ {:.8} (investment ${:.2})",
+                        strategy.strategy_type, strategy.symbol, price,
+                        config.min_investment.unwrap_or(0.0)),
+                    acted: false, price_change_percent: change, created_at: now,
+                });
+            } else {
+                // Apenas monitoring — sem investimento configurado ou ja em posicao
+                signals.push(StrategySignal {
+                    signal_type: SignalType::Info, price,
+                    message: format!("{} monitoring: {} @ {:.8} (delta {:.2}%)", strategy.strategy_type, strategy.symbol, price, change),
+                    acted: false, price_change_percent: change, created_at: now,
+                });
+            }
         }
         "grid" => {
             if let Some(grid) = &config.grid {
@@ -506,11 +519,28 @@ fn evaluate_entry_rules(strategy: &StrategyItem, price: f64, now: i64, signals: 
             }
         }
         _ => {
-            signals.push(StrategySignal {
-                signal_type: SignalType::Info, price,
-                message: format!("Unknown type '{}': monitoring {} @ {:.8}", strategy.strategy_type, strategy.symbol, price),
-                acted: false, price_change_percent: 0.0, created_at: now,
-            });
+            // Tipos customizados ou desconhecidos: mesma logica do swing_trade
+            // Se tem min_investment e sem posicao → entrada; senao → monitoring
+            let change = if let Some(last) = strategy.last_price {
+                if last > 0.0 { ((price - last) / last) * 100.0 } else { 0.0 }
+            } else { 0.0 };
+
+            if strategy.position.is_none() && config.min_investment.unwrap_or(0.0) > 0.0 {
+                signals.push(StrategySignal {
+                    signal_type: SignalType::Buy, price,
+                    message: format!("{} entry: {} @ {:.8} (investment ${:.2})",
+                        strategy.strategy_type, strategy.symbol, price,
+                        config.min_investment.unwrap_or(0.0)),
+                    acted: false, price_change_percent: change, created_at: now,
+                });
+            } else {
+                signals.push(StrategySignal {
+                    signal_type: SignalType::Info, price,
+                    message: format!("{} monitoring: {} @ {:.8} (delta {:.2}%)",
+                        strategy.strategy_type, strategy.symbol, price, change),
+                    acted: false, price_change_percent: change, created_at: now,
+                });
+            }
         }
     }
 }

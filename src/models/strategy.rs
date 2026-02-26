@@ -49,7 +49,7 @@ pub struct TakeProfitLevel {
     pub sell_percent: f64,
     #[serde(default)]
     pub executed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_at: Option<i64>,
 }
 
@@ -59,35 +59,35 @@ pub struct StopLossConfig {
     pub percent: f64,
     #[serde(default)]
     pub trailing: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_callback: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailing_distance: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DcaConfig {
     pub enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_buys: Option<i32>,
     #[serde(default)]
     pub buys_done: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dip_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount_per_buy: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GridConfig {
     pub enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub levels: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spacing_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub center_price: Option<f64>,
 }
 
@@ -95,17 +95,17 @@ pub struct GridConfig {
 pub struct StrategyConfig {
     #[serde(default)]
     pub take_profit_levels: Vec<TakeProfitLevel>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_loss: Option<StopLossConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dca: Option<DcaConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_investment: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_daily_operations: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_close_time: Option<i64>,
     #[serde(default = "default_mode")]
     pub mode: String,
@@ -316,32 +316,43 @@ fn default_check_interval() -> i64 {
 #[derive(Debug, Deserialize)]
 pub struct CreateStrategyRequest {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub strategy_type: String,
     pub symbol: String,
     pub exchange_id: String,
     pub exchange_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<StrategyConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_legacy: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_interval_secs: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateStrategyRequest {
+    #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub strategy_type: Option<String>,
+    #[serde(default)]
     pub symbol: Option<String>,
+    #[serde(default)]
     pub exchange_id: Option<String>,
+    #[serde(default)]
     pub exchange_name: Option<String>,
+    #[serde(default)]
     pub is_active: Option<bool>,
+    #[serde(default)]
     pub status: Option<StrategyStatus>,
+    #[serde(default)]
     pub config: Option<StrategyConfig>,
+    #[serde(default)]
     pub config_legacy: Option<serde_json::Value>,
+    #[serde(default)]
     pub check_interval_secs: Option<i64>,
 }
 

@@ -69,6 +69,10 @@ async fn main() -> std::io::Result<()> {
     // 📅 Start daily snapshot scheduler
     log::info!("📅 Starting background jobs...");
     jobs::snapshot_scheduler::start_daily_snapshot_scheduler(db.clone()).await;
+    
+    // 🎯 Start strategy monitor (Fase 4)
+    jobs::strategy_monitor::start_strategy_monitor(db.clone()).await;
+    
     log::info!("✅ Background jobs started");
     
     log::info!("🌐 Server starting on {}:{}", host, port);

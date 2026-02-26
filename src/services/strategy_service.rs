@@ -434,8 +434,14 @@ fn calculate_sell_amount(strategy: &StrategyItem, _price: f64, signal_type: &Sig
 
 fn evaluate_entry_rules(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Vec<StrategySignal>) {
     let config = &strategy.config;
-    match strategy.strategy_type.as_str() {
-        "buy_and_hold" => {
+
+    // Normaliza o tipo para match flexível:
+    // "Swing Trade" → "swingtrade", "swing_trade" → "swingtrade", "DCA" → "dca", "Buy and Hold" → "buyandhold"
+    let raw_type = strategy.strategy_type.to_lowercase().replace(['_', ' ', '-'], "");
+    let strategy_type_normalized = raw_type.as_str();
+
+    match strategy_type_normalized {
+        "buyandhold" | "buyhold" | "hold" => {
             if strategy.position.is_none() {
                 signals.push(StrategySignal {
                     signal_type: SignalType::Buy, price,
@@ -444,7 +450,7 @@ fn evaluate_entry_rules(strategy: &StrategyItem, price: f64, now: i64, signals: 
                 });
             }
         }
-        "dca" => {
+        "dca" | "dollarcost" | "dollarcostaveraging" | "precomedio" => {
             if let Some(dca) = &config.dca {
                 if dca.enabled {
                     let should_buy = match (dca.max_buys, dca.buys_done) {
@@ -467,7 +473,7 @@ fn evaluate_entry_rules(strategy: &StrategyItem, price: f64, now: i64, signals: 
                 }
             }
         }
-        "swing_trade" | "day_trade" | "scalping" => {
+        "swingtrade" | "swing" | "daytrade" | "day" | "scalping" | "scalp" => {
             let change = if let Some(last) = strategy.last_price {
                 if last > 0.0 { ((price - last) / last) * 100.0 } else { 0.0 }
             } else { 0.0 };
@@ -490,7 +496,7 @@ fn evaluate_entry_rules(strategy: &StrategyItem, price: f64, now: i64, signals: 
                 });
             }
         }
-        "grid" => {
+        "grid" | "gridtrading" | "gridbot" => {
             if let Some(grid) = &config.grid {
                 if grid.enabled {
                     if let (Some(center), Some(spacing), Some(levels)) = (grid.center_price, grid.spacing_percent, grid.levels) {

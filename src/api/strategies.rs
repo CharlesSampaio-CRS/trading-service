@@ -3,6 +3,7 @@ use mongodb::bson::{doc, oid::ObjectId};
 use crate::database::MongoDB;
 use crate::models::{Strategy, CreateStrategyRequest, UpdateStrategyRequest, StrategyResponse, StrategyListItem, StrategyStatus};
 use crate::middleware::auth::Claims;
+use crate::services::strategy_service;
 
 /// GET /api/v1/strategies - Lista todas as estratégias do usuário (compacta)
 #[get("")]
@@ -476,6 +477,139 @@ pub async fn delete_strategy(user: web::ReqData<Claims>, path: web::Path<String>
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
             "success": false,
             "error": format!("Failed to delete strategy: {}", e)
+        })),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// FASE 3: Endpoints do strategy engine
+// ═══════════════════════════════════════════════════════════════════
+
+/// POST /api/v1/strategies/{id}/activate - Ativa estratégia (→ Monitoring)
+#[post("/{id}/activate")]
+pub async fn activate_strategy(
+    user: web::ReqData<Claims>,
+    path: web::Path<String>,
+    db: web::Data<MongoDB>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    let strategy_id = path.into_inner();
+
+    match strategy_service::activate_strategy(&db, &strategy_id, user_id).await {
+        Ok(strategy) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "strategy": StrategyResponse::from(strategy)
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": e
+        })),
+    }
+}
+
+/// POST /api/v1/strategies/{id}/pause - Pausa estratégia
+#[post("/{id}/pause")]
+pub async fn pause_strategy(
+    user: web::ReqData<Claims>,
+    path: web::Path<String>,
+    db: web::Data<MongoDB>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    let strategy_id = path.into_inner();
+
+    match strategy_service::pause_strategy(&db, &strategy_id, user_id).await {
+        Ok(strategy) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "strategy": StrategyResponse::from(strategy)
+        })),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": e
+        })),
+    }
+}
+
+/// POST /api/v1/strategies/{id}/tick - Trigger manual de processamento
+#[post("/{id}/tick")]
+pub async fn tick_strategy(
+    user: web::ReqData<Claims>,
+    path: web::Path<String>,
+    db: web::Data<MongoDB>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    let strategy_id = path.into_inner();
+
+    let object_id = match ObjectId::parse_str(&strategy_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "error": "Invalid strategy ID"
+            }))
+        }
+    };
+
+    let collection = db.collection::<Strategy>("strategies");
+
+    let strategy = match collection
+        .find_one(doc! { "_id": object_id, "user_id": &user_id })
+        .await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": "Strategy not found"
+            }))
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Database error: {}", e)
+            }))
+        }
+    };
+
+    // Processar tick
+    let tick_result = strategy_service::tick(&db, &strategy).await;
+
+    // Persistir
+    if let Err(e) = strategy_service::persist_tick_result(&db, &strategy, &tick_result).await {
+        log::error!("Failed to persist tick: {}", e);
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "tick": {
+            "strategy_id": tick_result.strategy_id,
+            "symbol": tick_result.symbol,
+            "price": tick_result.price,
+            "signals_count": tick_result.signals.len(),
+            "executions_count": tick_result.executions.len(),
+            "new_status": tick_result.new_status,
+            "error": tick_result.error,
+            "signals": tick_result.signals,
+        }
+    }))
+}
+
+/// POST /api/v1/strategies/process-all - Processa todas estratégias ativas (admin/cron)
+#[post("/process-all")]
+pub async fn process_all_strategies(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    log::info!("🔄 Manual process-all triggered by user: {}", user_id);
+
+    match strategy_service::process_active_strategies(&db).await {
+        Ok(result) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "result": result
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": e
         })),
     }
 }

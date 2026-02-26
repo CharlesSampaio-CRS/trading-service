@@ -7,3 +7,4 @@ pub mod token_service;
 pub mod coingecko_service;
 pub mod exchange_rate_service;
 pub mod user_exchanges_service;
+pub mod strategy_service;

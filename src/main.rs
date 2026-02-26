@@ -4,6 +4,7 @@ mod database;
 mod jobs;
 mod middleware;
 mod models;
+mod seeds;
 mod services;
 mod utils;
 
@@ -61,6 +62,9 @@ async fn main() -> std::io::Result<()> {
     let db_data = web::Data::new(db.clone());
     
     log::info!("✅ MongoDB connected successfully");
+    
+    // 🌱 Seed default strategy templates
+    seeds::strategy_templates_seed::seed_default_templates(&db).await;
     
     // 📅 Start daily snapshot scheduler
     log::info!("📅 Starting background jobs...");

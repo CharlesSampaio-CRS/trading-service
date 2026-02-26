@@ -277,8 +277,8 @@ pub async fn create_strategy(
         exchange_id: body.exchange_id.clone(),
         exchange_name: body.exchange_name.clone(),
         is_active: true,
-        // Fase 2: novos campos
-        status: StrategyStatus::Idle,
+        // Fase 2: novos campos — nasce ativa + monitoring para ser processável
+        status: StrategyStatus::Monitoring,
         config: body.config.clone().unwrap_or_default(),
         config_legacy: body.config_legacy.clone(),
         position: None,

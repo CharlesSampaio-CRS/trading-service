@@ -116,8 +116,7 @@ pub async fn tick(
     match strategy.status {
         StrategyStatus::Paused
         | StrategyStatus::Completed
-        | StrategyStatus::Error
-        | StrategyStatus::Idle => {
+        | StrategyStatus::Error => {
             return TickResult {
                 strategy_id,
                 symbol: strategy.symbol.clone(),
@@ -127,6 +126,11 @@ pub async fn tick(
                 new_status: None,
                 error: Some(format!("Strategy status '{}' is not processable", strategy.status)),
             };
+        }
+        StrategyStatus::Idle => {
+            // Auto-promote: idle + is_active → monitoring, then proceed
+            log::info!("[tick] Strategy {} is idle but active — auto-promoting to monitoring", strategy_id);
+            // Will be persisted as Monitoring after tick completes
         }
         _ => {} // Monitoring, InPosition, BuyPending, SellPending → prosseguir
     }
@@ -206,7 +210,11 @@ pub async fn tick(
     let mut new_status: Option<StrategyStatus> = None;
 
     match strategy.status {
-        StrategyStatus::Monitoring => {
+        StrategyStatus::Monitoring | StrategyStatus::Idle => {
+            // Idle + is_active auto-promotes to Monitoring behavior
+            if strategy.status == StrategyStatus::Idle {
+                new_status = Some(StrategyStatus::Monitoring);
+            }
             // Avaliar regra de entrada (Buy signal)
             evaluate_entry_rules(strategy, price, now, &mut signals);
         }
@@ -1463,10 +1471,10 @@ pub async fn process_active_strategies(db: &MongoDB) -> Result<ProcessResult, St
     let collection = db.collection::<Strategy>("strategies");
     let now = chrono::Utc::now().timestamp();
 
-    // Buscar estratégias ativas com status processável
+    // Buscar estratégias ativas com status processável (idle auto-promove para monitoring)
     let filter = doc! {
         "is_active": true,
-        "status": { "$in": ["monitoring", "in_position", "buy_pending", "sell_pending"] }
+        "status": { "$in": ["idle", "monitoring", "in_position", "buy_pending", "sell_pending"] }
     };
 
     let mut cursor = collection

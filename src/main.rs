@@ -69,6 +69,10 @@ async fn main() -> std::io::Result<()> {
     // 📅 Start daily snapshot scheduler
     log::info!("📅 Starting background jobs...");
     jobs::snapshot_scheduler::start_daily_snapshot_scheduler(db.clone()).await;
+    
+    // 🎯 Start strategy monitor (Fase 4)
+    jobs::strategy_monitor::start_strategy_monitor(db.clone()).await;
+    
     log::info!("✅ Background jobs started");
     
     log::info!("🌐 Server starting on {}:{}", host, port);
@@ -176,6 +180,13 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api/v1/strategies")
                     .wrap(middleware::auth::AuthMiddleware)
                     .service(api::strategies::get_strategies)
+                    .service(api::strategies::get_strategy_stats)
+                    .service(api::strategies::get_strategy_executions)
+                    .service(api::strategies::get_strategy_signals)
+                    .service(api::strategies::activate_strategy)
+                    .service(api::strategies::pause_strategy)
+                    .service(api::strategies::tick_strategy)
+                    .service(api::strategies::process_all_strategies)
                     .service(api::strategies::get_strategy)
                     .service(api::strategies::create_strategy)
                     .service(api::strategies::update_strategy)

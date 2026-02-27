@@ -409,6 +409,28 @@ fn calculate_sell_amount(strategy: &StrategyItem, _price: f64, signal_type: &Sig
     };
     match signal_type {
         SignalType::TakeProfit => {
+            // Venda gradual — usa o próximo lote não executado
+            if let Some(gradual) = &strategy.config.gradual_sell {
+                if gradual.enabled && !gradual.lots.is_empty() {
+                    let lot = gradual.lots.iter().find(|l| !l.executed);
+                    return match lot {
+                        Some(lot) => {
+                            let pct = lot.sell_percent / 100.0;
+                            // Calcula a quantidade original (antes de vendas parciais)
+                            // usando total_cost e entry_price para manter proporção correta
+                            let original_qty = if position.entry_price > 0.0 {
+                                position.total_cost / position.entry_price
+                            } else {
+                                position.quantity
+                            };
+                            let sell_qty = (original_qty * pct).min(position.quantity);
+                            (sell_qty, lot.sell_percent)
+                        }
+                        None => (position.quantity, 100.0), // Todos lotes executados, vende resto
+                    };
+                }
+            }
+            // TP normal (sem gradual)
             let tp = strategy.config.take_profit_levels.iter().find(|tp| !tp.executed);
             match tp {
                 Some(tp_level) => {
@@ -418,7 +440,10 @@ fn calculate_sell_amount(strategy: &StrategyItem, _price: f64, signal_type: &Sig
                 None => (position.quantity, 100.0),
             }
         }
-        SignalType::StopLoss | SignalType::TrailingStop => (position.quantity, 100.0),
+        SignalType::StopLoss | SignalType::TrailingStop => {
+            // SL vende TUDO que resta (posição inteira restante)
+            (position.quantity, 100.0)
+        }
         SignalType::GridTrade => {
             let levels = strategy.config.grid.as_ref().and_then(|g| g.levels).unwrap_or(1) as f64;
             let sell_pct = 100.0 / levels;
@@ -566,7 +591,84 @@ fn evaluate_exit_rules(strategy: &StrategyItem, price: f64, now: i64, signals: &
     let price_change_pct = ((price - entry_price) / entry_price) * 100.0;
     let highest = position.highest_price.max(price);
 
-    // Take Profit
+    // ═══════════════════════════════════════════════════════════════
+    // VENDA GRADUAL — Lotes escalonados com TPs independentes
+    // ═══════════════════════════════════════════════════════════════
+    if let Some(gradual) = &config.gradual_sell {
+        if gradual.enabled && !gradual.lots.is_empty() {
+            // Percorre lotes na ordem, dispara o primeiro não executado que atingiu TP
+            for (i, lot) in gradual.lots.iter().enumerate() {
+                if lot.executed { continue; }
+                if price_change_pct >= lot.tp_percent {
+                    let fee_pct = config.fee_percent.unwrap_or(0.0);
+                    let lot_value = position.total_cost * (lot.sell_percent / 100.0);
+                    let lot_profit_gross = lot_value * (lot.tp_percent / 100.0);
+                    let lot_sell_value = lot_value + lot_profit_gross;
+                    let lot_fee = lot_sell_value * (fee_pct / 100.0);
+                    let lot_profit_net = lot_profit_gross - lot_fee;
+
+                    signals.push(StrategySignal {
+                        signal_type: SignalType::TakeProfit, price,
+                        message: format!(
+                            "Gradual TP Lote {} ({:.0}%): preço +{:.2}% >= +{:.2}% | sell {:.0}% da posição | lucro líq ${:.2}",
+                            i + 1, lot.sell_percent, price_change_pct, lot.tp_percent,
+                            lot.sell_percent, lot_profit_net
+                        ),
+                        acted: false, price_change_percent: price_change_pct, created_at: now,
+                    });
+                    // Só dispara um lote por ciclo
+                    break;
+                }
+            }
+
+            // Stop Loss — aplica no restante (lotes não executados)
+            if let Some(sl) = &config.stop_loss {
+                if sl.enabled {
+                    let sl_threshold = -(sl.percent);
+
+                    if sl.trailing {
+                        let trailing_distance = sl.trailing_distance.unwrap_or(sl.percent);
+                        let trailing_threshold = highest * (1.0 - trailing_distance / 100.0);
+                        if price <= trailing_threshold {
+                            let drop_from_high = ((price - highest) / highest) * 100.0;
+                            // Calcula % restante dos lotes não executados
+                            let remaining_pct: f64 = gradual.lots.iter()
+                                .filter(|l| !l.executed)
+                                .map(|l| l.sell_percent)
+                                .sum();
+                            signals.push(StrategySignal {
+                                signal_type: SignalType::TrailingStop, price,
+                                message: format!(
+                                    "Trailing Stop (gradual): preco {:.8} caiu {:.2}% do max {:.8} | vende {:.0}% restante",
+                                    price, drop_from_high, highest, remaining_pct
+                                ),
+                                acted: false, price_change_percent: price_change_pct, created_at: now,
+                            });
+                        }
+                    } else if price_change_pct <= sl_threshold {
+                        let remaining_pct: f64 = gradual.lots.iter()
+                            .filter(|l| !l.executed)
+                            .map(|l| l.sell_percent)
+                            .sum();
+                        signals.push(StrategySignal {
+                            signal_type: SignalType::StopLoss, price,
+                            message: format!(
+                                "Stop Loss (gradual): {:.2}% <= {:.2}% | vende {:.0}% restante",
+                                price_change_pct, sl_threshold, remaining_pct
+                            ),
+                            acted: false, price_change_percent: price_change_pct, created_at: now,
+                        });
+                    }
+                }
+            }
+
+            return; // Gradual sell handled — skip normal TP/SL
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // TAKE PROFIT NORMAL (sem venda gradual)
+    // ═══════════════════════════════════════════════════════════════
     for (i, tp) in config.take_profit_levels.iter().enumerate() {
         if !tp.executed && price_change_pct >= tp.percent {
             signals.push(StrategySignal {
@@ -693,6 +795,7 @@ pub async fn persist_tick_result(
     let mut accumulated_pnl: f64 = 0.0;
     let mut dca_buys_increment: i32 = 0;
     let mut tp_indices_executed: Vec<usize> = Vec::new();
+    let mut gradual_lot_indices_executed: Vec<usize> = Vec::new();
 
     for exec in &result.executions {
         match exec.action {
@@ -736,6 +839,18 @@ pub async fn persist_tick_result(
                     }
                 }
                 if exec.reason.starts_with("take_profit") {
+                    // Venda gradual — marca lote como executado
+                    if let Some(gradual) = &strategy.config.gradual_sell {
+                        if gradual.enabled {
+                            for (i, lot) in gradual.lots.iter().enumerate() {
+                                if !lot.executed && !gradual_lot_indices_executed.contains(&i) {
+                                    gradual_lot_indices_executed.push(i);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // TP normal
                     for (i, tp) in strategy.config.take_profit_levels.iter().enumerate() {
                         if !tp.executed && !tp_indices_executed.contains(&i) {
                             tp_indices_executed.push(i);
@@ -793,6 +908,43 @@ pub async fn persist_tick_result(
     for idx in &tp_indices_executed {
         update_set.insert(format!("{}.config.take_profit_levels.{}.executed", p, idx), true);
         update_set.insert(format!("{}.config.take_profit_levels.{}.executed_at", p, idx), now);
+    }
+
+    // Lotes graduais executados
+    for idx in &gradual_lot_indices_executed {
+        update_set.insert(format!("{}.config.gradual_sell.lots.{}.executed", p, idx), true);
+        update_set.insert(format!("{}.config.gradual_sell.lots.{}.executed_at", p, idx), now);
+        update_set.insert(format!("{}.config.gradual_sell.lots.{}.executed_price", p, idx), result.price);
+        // Calcula PNL líquido do lote
+        if let Some(gradual) = &strategy.config.gradual_sell {
+            if let Some(lot) = gradual.lots.get(*idx) {
+                if let Some(ref pos) = strategy.position {
+                    let fee_pct = strategy.config.fee_percent.unwrap_or(0.0);
+                    let lot_value = pos.total_cost * (lot.sell_percent / 100.0);
+                    let lot_profit_gross = lot_value * (lot.tp_percent / 100.0);
+                    let lot_sell_value = lot_value + lot_profit_gross;
+                    let lot_fee = lot_sell_value * (fee_pct / 100.0);
+                    let lot_profit_net = lot_profit_gross - lot_fee;
+                    update_set.insert(format!("{}.config.gradual_sell.lots.{}.realized_pnl", p, idx), lot_profit_net);
+                }
+            }
+        }
+    }
+
+    // Verificar se todos lotes graduais foram executados → completar estratégia
+    if !gradual_lot_indices_executed.is_empty() {
+        if let Some(gradual) = &strategy.config.gradual_sell {
+            if gradual.enabled {
+                let all_executed = gradual.lots.iter().enumerate().all(|(i, lot)| {
+                    lot.executed || gradual_lot_indices_executed.contains(&i)
+                });
+                if all_executed {
+                    update_set.insert(format!("{}.status", p), mongodb::bson::to_bson(&StrategyStatus::Completed).unwrap_or_default());
+                    update_set.insert(format!("{}.is_active", p), false);
+                    log::info!("[Strategy {}] All gradual lots executed — strategy COMPLETED", strategy.strategy_id);
+                }
+            }
+        }
     }
 
     let mut update_doc = doc! { "$set": update_set };

@@ -91,6 +91,37 @@ pub struct GridConfig {
     pub center_price: Option<f64>,
 }
 
+/// Configuração de venda gradual escalonada
+/// Cada lote define % da posição e o TP% respectivo
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GradualSellLot {
+    /// Percentual da posição total a vender neste lote (ex: 30.0 = 30%)
+    pub sell_percent: f64,
+    /// Take profit % para este lote (ex: 10.0 = +10% do preço base)
+    pub tp_percent: f64,
+    /// Se este lote já foi executado
+    #[serde(default)]
+    pub executed: bool,
+    /// Timestamp da execução
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_at: Option<i64>,
+    /// Preço em que foi executado
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_price: Option<f64>,
+    /// Lucro líquido realizado neste lote
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realized_pnl: Option<f64>,
+}
+
+/// Configuração de venda gradual
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GradualSellConfig {
+    pub enabled: bool,
+    /// Lotes de venda escalonados (soma dos sell_percent deve = 100%)
+    #[serde(default)]
+    pub lots: Vec<GradualSellLot>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
     #[serde(default)]
@@ -101,6 +132,12 @@ pub struct StrategyConfig {
     pub dca: Option<DcaConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridConfig>,
+    /// Taxa da exchange/rede em % (ex: 0.5 = 0.5%). Descontada em cada venda.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_percent: Option<f64>,
+    /// Venda gradual escalonada (lotes com TPs diferentes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradual_sell: Option<GradualSellConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_investment: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +159,8 @@ impl Default for StrategyConfig {
             stop_loss: None,
             dca: None,
             grid: None,
+            fee_percent: None,
+            gradual_sell: None,
             min_investment: None,
             max_daily_operations: None,
             auto_close_time: None,

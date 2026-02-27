@@ -3,7 +3,7 @@ use mongodb::bson::doc;
 use crate::database::MongoDB;
 use crate::models::{
     UserStrategies, StrategyItem, CreateStrategyRequest, UpdateStrategyRequest,
-    StrategyResponse, StrategyListItem, StrategyStatus, GradualLot,
+    StrategyResponse, StrategyListItem, StrategyStatus, GradualLot, StrategySignal,
 };
 use crate::middleware::auth::Claims;
 use crate::services::strategy_service;
@@ -361,12 +361,35 @@ pub async fn tick_strategy(user: web::ReqData<Claims>, path: web::Path<String>, 
             sid, tr.symbol, tr.price, tr.new_status, tr.signals.len(), tr.executions.len());
     }
 
+    // ── Build rich tick summary for frontend ──────────────────────
+    let last_signal_message = tr.signals.last().map(|s| s.message.clone());
+    let last_signal_type = tr.signals.last().map(|s| &s.signal_type);
+    let summary = if let Some(ref err) = tr.error {
+        err.clone()
+    } else if let Some(msg) = &last_signal_message {
+        msg.clone()
+    } else {
+        format!("Tick processado — sem sinais para {}", tr.symbol)
+    };
+
+    let acted_signals: Vec<&StrategySignal> = tr.signals.iter().filter(|s| s.acted).collect();
+    let info_signals: Vec<&StrategySignal> = tr.signals.iter().filter(|s| !s.acted).collect();
+
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "tick": {
-            "strategy_id": tr.strategy_id, "symbol": tr.symbol, "price": tr.price,
-            "signals_count": tr.signals.len(), "executions_count": tr.executions.len(),
-            "new_status": tr.new_status, "error": tr.error, "signals": tr.signals,
+            "strategy_id": tr.strategy_id,
+            "symbol": tr.symbol,
+            "price": tr.price,
+            "signals_count": tr.signals.len(),
+            "executions_count": tr.executions.len(),
+            "new_status": tr.new_status,
+            "error": tr.error,
+            "summary": summary,
+            "signals": tr.signals,
+            "executions": tr.executions,
+            "acted_count": acted_signals.len(),
+            "info_count": info_signals.len(),
         }
     }))
 }

@@ -905,13 +905,17 @@ pub async fn activate_strategy(db: &MongoDB, strategy_id: &str, user_id: &str) -
     let now = chrono::Utc::now().timestamp();
     let p = "strategies.$[elem]";
 
-    log::info!("▶️ Activating strategy '{}' ({}) for user {}", strategy.name, strategy_id, user_id);
+    log::info!("▶️ Activating strategy '{}' ({}) for user {} — resetting started_at for new expiration cycle", strategy.name, strategy_id, user_id);
 
+    // Reset started_at so the expiration timer starts fresh.
+    // Without this, a previously expired strategy would immediately expire again
+    // because is_expired() checks (now - started_at) >= time_execution_min * 60.
     collection.update_one(
         doc! { "user_id": user_id },
         doc! { "$set": {
             format!("{}.status", p): "monitoring",
             format!("{}.is_active", p): true,
+            format!("{}.started_at", p): now,
             format!("{}.error_message", p): mongodb::bson::Bson::Null,
             format!("{}.updated_at", p): now,
             "updated_at": now,

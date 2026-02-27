@@ -1,27 +1,22 @@
 use serde::{Deserialize, Serialize};
 use mongodb::bson::oid::ObjectId;
 
-// ═══════════════════════════════════════════════════════════════════
-// STRATEGY STATUS
-// ═══════════════════════════════════════════════════════════════════
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyStatus {
     Idle,
     Monitoring,
-    BuyPending,
     InPosition,
-    SellPending,
-    Paused,
+    GradualSelling,
     Completed,
+    StoppedOut,
+    Expired,
+    Paused,
     Error,
 }
 
 impl Default for StrategyStatus {
-    fn default() -> Self {
-        StrategyStatus::Idle
-    }
+    fn default() -> Self { StrategyStatus::Idle }
 }
 
 impl std::fmt::Display for StrategyStatus {
@@ -29,149 +24,85 @@ impl std::fmt::Display for StrategyStatus {
         match self {
             StrategyStatus::Idle => write!(f, "idle"),
             StrategyStatus::Monitoring => write!(f, "monitoring"),
-            StrategyStatus::BuyPending => write!(f, "buy_pending"),
             StrategyStatus::InPosition => write!(f, "in_position"),
-            StrategyStatus::SellPending => write!(f, "sell_pending"),
-            StrategyStatus::Paused => write!(f, "paused"),
+            StrategyStatus::GradualSelling => write!(f, "gradual_selling"),
             StrategyStatus::Completed => write!(f, "completed"),
+            StrategyStatus::StoppedOut => write!(f, "stopped_out"),
+            StrategyStatus::Expired => write!(f, "expired"),
+            StrategyStatus::Paused => write!(f, "paused"),
             StrategyStatus::Error => write!(f, "error"),
         }
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// CONFIG STRUCTS
-// ═══════════════════════════════════════════════════════════════════
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TakeProfitLevel {
-    pub percent: f64,
+pub struct GradualLot {
+    pub lot_number: i32,
     pub sell_percent: f64,
     #[serde(default)]
     pub executed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StopLossConfig {
-    pub enabled: bool,
-    pub percent: f64,
-    #[serde(default)]
-    pub trailing: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trailing_callback: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trailing_distance: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DcaConfig {
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_buys: Option<i32>,
-    #[serde(default)]
-    pub buys_done: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dip_percent: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amount_per_buy: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_seconds: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GridConfig {
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub levels: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spacing_percent: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub center_price: Option<f64>,
-}
-
-/// Configuração de venda gradual escalonada
-/// Cada lote define % da posição e o TP% respectivo
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GradualSellLot {
-    /// Percentual da posição total a vender neste lote (ex: 30.0 = 30%)
-    pub sell_percent: f64,
-    /// Take profit % para este lote (ex: 10.0 = +10% do preço base)
-    pub tp_percent: f64,
-    /// Se este lote já foi executado
-    #[serde(default)]
-    pub executed: bool,
-    /// Timestamp da execução
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executed_at: Option<i64>,
-    /// Preço em que foi executado
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_price: Option<f64>,
-    /// Lucro líquido realizado neste lote
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realized_pnl: Option<f64>,
 }
 
-/// Configuração de venda gradual
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GradualSellConfig {
-    pub enabled: bool,
-    /// Lotes de venda escalonados (soma dos sell_percent deve = 100%)
-    #[serde(default)]
-    pub lots: Vec<GradualSellLot>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
+    pub base_price: f64,
+    pub take_profit_percent: f64,
+    pub stop_loss_percent: f64,
+    pub gradual_take_percent: f64,
+    pub fee_percent: f64,
     #[serde(default)]
-    pub take_profit_levels: Vec<TakeProfitLevel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop_loss: Option<StopLossConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dca: Option<DcaConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grid: Option<GridConfig>,
-    /// Taxa da exchange/rede em % (ex: 0.5 = 0.5%). Descontada em cada venda.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fee_percent: Option<f64>,
-    /// Venda gradual escalonada (lotes com TPs diferentes)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gradual_sell: Option<GradualSellConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_investment: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_daily_operations: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_close_time: Option<i64>,
-    #[serde(default = "default_mode")]
-    pub mode: String,
+    pub gradual_sell: bool,
+    #[serde(default)]
+    pub gradual_lots: Vec<GradualLot>,
+    #[serde(default = "default_timer_gradual")]
+    pub timer_gradual_min: i64,
+    #[serde(default = "default_time_execution")]
+    pub time_execution_min: i64,
 }
 
-fn default_mode() -> String {
-    "spot".to_string()
-}
+fn default_timer_gradual() -> i64 { 15 }
+fn default_time_execution() -> i64 { 120 }
 
 impl Default for StrategyConfig {
     fn default() -> Self {
         StrategyConfig {
-            take_profit_levels: vec![],
-            stop_loss: None,
-            dca: None,
-            grid: None,
-            fee_percent: None,
-            gradual_sell: None,
-            min_investment: None,
-            max_daily_operations: None,
-            auto_close_time: None,
-            mode: "spot".to_string(),
+            base_price: 0.0,
+            take_profit_percent: 10.0,
+            stop_loss_percent: 5.0,
+            gradual_take_percent: 2.0,
+            fee_percent: 0.5,
+            gradual_sell: false,
+            gradual_lots: vec![],
+            timer_gradual_min: 15,
+            time_execution_min: 120,
         }
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// EXECUTIONS
-// ═══════════════════════════════════════════════════════════════════
+impl StrategyConfig {
+    pub fn trigger_price(&self) -> f64 {
+        let tp_factor = self.take_profit_percent / 100.0;
+        let fee_factor = self.fee_percent / 100.0;
+        self.base_price * (1.0 + tp_factor + fee_factor)
+    }
+
+    pub fn stop_loss_price(&self) -> f64 {
+        self.base_price * (1.0 - self.stop_loss_percent / 100.0)
+    }
+
+    pub fn gradual_trigger_price(&self, lot_index: usize) -> f64 {
+        let base_tp = self.take_profit_percent / 100.0;
+        let fee = self.fee_percent / 100.0;
+        let gradual_step = self.gradual_take_percent / 100.0;
+        self.base_price * (1.0 + base_tp + fee + gradual_step * lot_index as f64)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -180,9 +111,6 @@ pub enum ExecutionAction {
     Sell,
     BuyFailed,
     SellFailed,
-    DcaBuy,
-    GridBuy,
-    GridSell,
 }
 
 impl std::fmt::Display for ExecutionAction {
@@ -192,9 +120,6 @@ impl std::fmt::Display for ExecutionAction {
             ExecutionAction::Sell => write!(f, "sell"),
             ExecutionAction::BuyFailed => write!(f, "buy_failed"),
             ExecutionAction::SellFailed => write!(f, "sell_failed"),
-            ExecutionAction::DcaBuy => write!(f, "dca_buy"),
-            ExecutionAction::GridBuy => write!(f, "grid_buy"),
-            ExecutionAction::GridSell => write!(f, "grid_sell"),
         }
     }
 }
@@ -218,34 +143,24 @@ pub struct StrategyExecution {
     pub error_message: Option<String>,
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// SIGNALS
-// ═══════════════════════════════════════════════════════════════════
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalType {
-    Buy,
     TakeProfit,
     StopLoss,
-    TrailingStop,
-    DcaBuy,
-    GridTrade,
+    GradualSell,
+    Expired,
     Info,
-    PriceAlert,
 }
 
 impl std::fmt::Display for SignalType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SignalType::Buy => write!(f, "buy"),
             SignalType::TakeProfit => write!(f, "take_profit"),
             SignalType::StopLoss => write!(f, "stop_loss"),
-            SignalType::TrailingStop => write!(f, "trailing_stop"),
-            SignalType::DcaBuy => write!(f, "dca_buy"),
-            SignalType::GridTrade => write!(f, "grid_trade"),
+            SignalType::GradualSell => write!(f, "gradual_sell"),
+            SignalType::Expired => write!(f, "expired"),
             SignalType::Info => write!(f, "info"),
-            SignalType::PriceAlert => write!(f, "price_alert"),
         }
     }
 }
@@ -262,10 +177,6 @@ pub struct StrategySignal {
     pub created_at: i64,
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// POSITION INFO
-// ═══════════════════════════════════════════════════════════════════
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionInfo {
     pub entry_price: f64,
@@ -279,15 +190,8 @@ pub struct PositionInfo {
     pub unrealized_pnl_percent: f64,
     #[serde(default)]
     pub highest_price: f64,
-    #[serde(default)]
-    pub lowest_price: f64,
     pub opened_at: i64,
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// USER STRATEGIES — 1 doc per user (padrão UserExchanges)
-// Collection: "user_strategies"
-// ═══════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserStrategies {
@@ -304,9 +208,6 @@ pub struct UserStrategies {
 pub struct StrategyItem {
     pub strategy_id: String,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub strategy_type: String,
     pub symbol: String,
     pub exchange_id: String,
     pub exchange_name: String,
@@ -317,8 +218,6 @@ pub struct StrategyItem {
     #[serde(default)]
     pub config: StrategyConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub config_legacy: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<PositionInfo>,
     #[serde(default)]
     pub executions: Vec<StrategyExecution>,
@@ -328,55 +227,34 @@ pub struct StrategyItem {
     pub last_checked_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_price: Option<f64>,
-    #[serde(default = "default_check_interval")]
-    pub check_interval_secs: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_gradual_sell_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     #[serde(default)]
     pub total_pnl_usd: f64,
     #[serde(default)]
     pub total_executions: i32,
+    pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-fn default_true() -> bool {
-    true
-}
-
-fn default_check_interval() -> i64 {
-    60
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// REQUEST / RESPONSE DTOs
-// ═══════════════════════════════════════════════════════════════════
+fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateStrategyRequest {
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub strategy_type: String,
     pub symbol: String,
     pub exchange_id: String,
     pub exchange_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<StrategyConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_legacy: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_interval_secs: Option<i64>,
+    pub config: StrategyConfig,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateStrategyRequest {
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub strategy_type: Option<String>,
     #[serde(default)]
     pub symbol: Option<String>,
     #[serde(default)]
@@ -386,27 +264,16 @@ pub struct UpdateStrategyRequest {
     #[serde(default)]
     pub is_active: Option<bool>,
     #[serde(default)]
-    pub status: Option<StrategyStatus>,
-    #[serde(default)]
     pub config: Option<StrategyConfig>,
-    #[serde(default)]
-    pub config_legacy: Option<serde_json::Value>,
-    #[serde(default)]
-    pub check_interval_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyStatsResponse {
     pub total_executions: i32,
-    pub total_buys: i32,
     pub total_sells: i32,
     pub total_pnl_usd: f64,
-    pub win_rate: f64,
-    pub avg_profit_per_trade: f64,
     pub total_fees: f64,
-    pub last_execution_at: Option<i64>,
-    pub last_signal_at: Option<i64>,
-    pub days_active: i64,
+    pub win_rate: f64,
     pub current_position: Option<PositionInfo>,
 }
 
@@ -414,16 +281,14 @@ pub struct StrategyStatsResponse {
 pub struct StrategyResponse {
     pub id: String,
     pub name: String,
-    pub description: Option<String>,
-    pub strategy_type: String,
     pub symbol: String,
     pub exchange_id: String,
     pub exchange_name: String,
     pub is_active: bool,
     pub status: StrategyStatus,
     pub config: StrategyConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub config_legacy: Option<serde_json::Value>,
+    pub trigger_price: f64,
+    pub stop_loss_price: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<PositionInfo>,
     pub executions: Vec<StrategyExecution>,
@@ -432,53 +297,44 @@ pub struct StrategyResponse {
     pub last_checked_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_price: Option<f64>,
-    pub check_interval_secs: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub total_pnl_usd: f64,
     pub total_executions: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<StrategyStatsResponse>,
+    pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 impl StrategyItem {
     pub fn compute_stats(&self) -> StrategyStatsResponse {
-        let total_buys = self.executions.iter()
-            .filter(|e| matches!(e.action, ExecutionAction::Buy | ExecutionAction::DcaBuy | ExecutionAction::GridBuy))
-            .count() as i32;
         let total_sells = self.executions.iter()
-            .filter(|e| matches!(e.action, ExecutionAction::Sell | ExecutionAction::GridSell))
+            .filter(|e| e.action == ExecutionAction::Sell)
             .count() as i32;
-        let sell_executions: Vec<&StrategyExecution> = self.executions.iter()
-            .filter(|e| matches!(e.action, ExecutionAction::Sell | ExecutionAction::GridSell))
+        let sell_execs: Vec<&StrategyExecution> = self.executions.iter()
+            .filter(|e| e.action == ExecutionAction::Sell)
             .collect();
         let total_fees: f64 = self.executions.iter().map(|e| e.fee).sum();
-        let wins = sell_executions.iter().filter(|e| e.pnl_usd > 0.0).count();
-        let win_rate = if sell_executions.is_empty() { 0.0 } else {
-            (wins as f64 / sell_executions.len() as f64) * 100.0
+        let wins = sell_execs.iter().filter(|e| e.pnl_usd > 0.0).count();
+        let win_rate = if sell_execs.is_empty() { 0.0 } else {
+            (wins as f64 / sell_execs.len() as f64) * 100.0
         };
-        let avg_profit = if sell_executions.is_empty() { 0.0 } else {
-            sell_executions.iter().map(|e| e.pnl_usd).sum::<f64>() / sell_executions.len() as f64
-        };
-        let last_execution_at = self.executions.last().map(|e| e.executed_at);
-        let last_signal_at = self.signals.last().map(|s| s.created_at);
-        let now = chrono::Utc::now().timestamp();
-        let days_active = (now - self.created_at) / 86400;
         StrategyStatsResponse {
             total_executions: self.executions.len() as i32,
-            total_buys,
             total_sells,
             total_pnl_usd: self.total_pnl_usd,
-            win_rate,
-            avg_profit_per_trade: avg_profit,
             total_fees,
-            last_execution_at,
-            last_signal_at,
-            days_active,
+            win_rate,
             current_position: self.position.clone(),
         }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        let max_secs = self.config.time_execution_min * 60;
+        now - self.started_at >= max_secs
     }
 }
 
@@ -488,25 +344,24 @@ impl From<StrategyItem> for StrategyResponse {
         StrategyResponse {
             id: item.strategy_id.clone(),
             name: item.name,
-            description: item.description,
-            strategy_type: item.strategy_type,
             symbol: item.symbol,
             exchange_id: item.exchange_id,
             exchange_name: item.exchange_name,
             is_active: item.is_active,
             status: item.status,
+            trigger_price: item.config.trigger_price(),
+            stop_loss_price: item.config.stop_loss_price(),
             config: item.config,
-            config_legacy: item.config_legacy,
             position: item.position,
             executions: item.executions,
             signals: item.signals,
             last_checked_at: item.last_checked_at,
             last_price: item.last_price,
-            check_interval_secs: item.check_interval_secs,
             error_message: item.error_message,
             total_pnl_usd: item.total_pnl_usd,
             total_executions: item.total_executions,
             stats: Some(stats),
+            started_at: item.started_at,
             created_at: item.created_at,
             updated_at: item.updated_at,
         }
@@ -517,26 +372,19 @@ impl From<StrategyItem> for StrategyResponse {
 pub struct StrategyListItem {
     pub id: String,
     pub name: String,
-    pub description: Option<String>,
-    pub strategy_type: String,
     pub symbol: String,
-    pub exchange_id: String,
     pub exchange_name: String,
     pub is_active: bool,
     pub status: StrategyStatus,
+    pub trigger_price: f64,
+    pub stop_loss_price: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<PositionInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_price: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_checked_at: Option<i64>,
     pub total_pnl_usd: f64,
     pub total_executions: i32,
-    pub executions_count: usize,
-    pub signals_count: usize,
-    pub check_interval_secs: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_message: Option<String>,
+    pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -546,22 +394,17 @@ impl From<StrategyItem> for StrategyListItem {
         StrategyListItem {
             id: item.strategy_id.clone(),
             name: item.name,
-            description: item.description,
-            strategy_type: item.strategy_type,
             symbol: item.symbol,
-            exchange_id: item.exchange_id,
             exchange_name: item.exchange_name,
             is_active: item.is_active,
             status: item.status,
+            trigger_price: item.config.trigger_price(),
+            stop_loss_price: item.config.stop_loss_price(),
             position: item.position,
             last_price: item.last_price,
-            last_checked_at: item.last_checked_at,
             total_pnl_usd: item.total_pnl_usd,
             total_executions: item.total_executions,
-            executions_count: item.executions.len(),
-            signals_count: item.signals.len(),
-            check_interval_secs: item.check_interval_secs,
-            error_message: item.error_message,
+            started_at: item.started_at,
             created_at: item.created_at,
             updated_at: item.updated_at,
         }

@@ -339,7 +339,7 @@ pub async fn tick_strategy(user: web::ReqData<Claims>, path: web::Path<String>, 
 
     let tr = strategy_service::tick(&db, uid, &strategy).await;
 
-    if let Err(e) = strategy_service::persist_tick_result(&db, uid, &strategy, &tr).await {
+    if let Err(e) = strategy_service::persist_tick_result(&db, uid, &strategy, &tr, true).await {
         log::error!("❌ Tick persist failed: strategy={}, error={}", sid, e);
         return HttpResponse::InternalServerError().json(serde_json::json!({
             "success": false,

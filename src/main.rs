@@ -4,6 +4,7 @@ mod database;
 mod jobs;
 mod middleware;
 mod models;
+mod seeds;
 mod services;
 mod utils;
 
@@ -62,9 +63,16 @@ async fn main() -> std::io::Result<()> {
     
     log::info!("✅ MongoDB connected successfully");
     
+    // 🌱 Seed default strategy templates
+    seeds::strategy_templates_seed::seed_default_templates(&db).await;
+    
     // 📅 Start daily snapshot scheduler
     log::info!("📅 Starting background jobs...");
     jobs::snapshot_scheduler::start_daily_snapshot_scheduler(db.clone()).await;
+    
+    // 🎯 Start strategy monitor (Fase 4)
+    jobs::strategy_monitor::start_strategy_monitor(db.clone()).await;
+    
     log::info!("✅ Background jobs started");
     
     log::info!("🌐 Server starting on {}:{}", host, port);
@@ -172,10 +180,28 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api/v1/strategies")
                     .wrap(middleware::auth::AuthMiddleware)
                     .service(api::strategies::get_strategies)
+                    .service(api::strategies::get_strategy_stats)
+                    .service(api::strategies::get_strategy_executions)
+                    .service(api::strategies::get_strategy_signals)
+                    .service(api::strategies::activate_strategy)
+                    .service(api::strategies::pause_strategy)
+                    .service(api::strategies::tick_strategy)
+                    .service(api::strategies::process_all_strategies)
                     .service(api::strategies::get_strategy)
                     .service(api::strategies::create_strategy)
                     .service(api::strategies::update_strategy)
                     .service(api::strategies::delete_strategy)
+            )
+            
+            // Strategy Templates: Independent template management
+            .service(
+                web::scope("/api/v1/strategy-templates")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .service(api::strategy_templates::get_templates)
+                    .service(api::strategy_templates::get_template)
+                    .service(api::strategy_templates::create_template)
+                    .service(api::strategy_templates::update_template)
+                    .service(api::strategy_templates::delete_template)
             )
             
             // Balances: Real-time from exchanges via CCXT

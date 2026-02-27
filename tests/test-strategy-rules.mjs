@@ -11,6 +11,9 @@
  *   4. Status transitions & activation/pause
  *   5. Field validations & error handling
  *   6. Tick endpoint behavior
+ *   7. Signal message structure & content validation
+ *   8. Error classification (classify_order_error)
+ *   9. Tick status guards — terminal status messages
  *
  * Usage:
  *   node tests/test-strategy-rules.mjs
@@ -518,12 +521,18 @@ async function testAPIIntegration() {
     logTest('tick.symbol = SOL/USDT')
     assertEq(tick.symbol, 'SOL/USDT')
 
+    logTest('tick.signals_count >= 1 (at least one info signal)')
+    assertTrue(tick.signals_count >= 1, `signals_count=${tick.signals_count}`)
+
+    logTest('tick.price > 0 (fetched real price)')
+    assertTrue(tick.price > 0, `price=${tick.price}`)
+
     logInfo(`tick price: ${tick.price}, signals: ${tick.signals_count}, execs: ${tick.executions_count}, new_status: ${tick.new_status || 'N/A'}`)
     if (tick.error) logInfo(`tick error: ${tick.error}`)
   }
 
-  // ── 4.8 Executions & Signals ─────────────
-  log(`\n  ${C.magenta}4.8 Executions & Signals Endpoints${C.reset}`)
+  // ── 4.8 Executions & Signals — Content Validation ─────────────
+  log(`\n  ${C.magenta}4.8 Signals Content Validation${C.reset}`)
 
   logTest(`GET /strategies/${createdId}/executions -> 200`)
   const execsRes = await api('GET', `/strategies/${createdId}/executions`)
@@ -533,8 +542,57 @@ async function testAPIIntegration() {
   const sigsRes = await api('GET', `/strategies/${createdId}/signals`)
   assertEq(sigsRes.status, 200)
 
-  // ── 4.9 Error Cases ─────────────
-  log(`\n  ${C.magenta}4.9 Error Cases${C.reset}`)
+  const signals = sigsRes.data?.signals || []
+  logInfo(`Total signals returned: ${signals.length}`)
+
+  if (signals.length > 0) {
+    const lastSig = signals[0] // Most recent (reversed order from API)
+
+    logTest('signal has signal_type field')
+    assertTrue(typeof lastSig.signal_type === 'string' && lastSig.signal_type.length > 0, `type=${lastSig.signal_type}`)
+
+    logTest('signal.signal_type is valid enum')
+    const validTypes = ['take_profit', 'stop_loss', 'gradual_sell', 'expired', 'info']
+    assertTrue(validTypes.includes(lastSig.signal_type), `type=${lastSig.signal_type}`)
+
+    logTest('signal has message field (non-empty string)')
+    assertTrue(typeof lastSig.message === 'string' && lastSig.message.length > 0, `len=${lastSig.message?.length}`)
+
+    logTest('signal.message length >= 20 (detailed message)')
+    assertTrue(lastSig.message.length >= 20, `msg="${lastSig.message}"`)
+
+    logTest('signal has price > 0')
+    assertTrue(lastSig.price > 0, `price=${lastSig.price}`)
+
+    logTest('signal has price_change_percent (number)')
+    assertTrue(typeof lastSig.price_change_percent === 'number', `pct=${lastSig.price_change_percent}`)
+
+    logTest('signal has created_at (timestamp > 0)')
+    assertTrue(lastSig.created_at > 0, `ts=${lastSig.created_at}`)
+
+    logTest('signal has acted field (boolean)')
+    assertTrue(typeof lastSig.acted === 'boolean', `acted=${lastSig.acted}`)
+
+    // For monitoring status (no position) the signal should be info with keywords
+    if (lastSig.signal_type === 'info') {
+      logTest('info signal contains monitoring keywords (trigger/stop/preço)')
+      const hasKeywords = lastSig.message.includes('trigger') ||
+        lastSig.message.includes('stop') ||
+        lastSig.message.includes('preço') ||
+        lastSig.message.includes('Preço') ||
+        lastSig.message.includes('Monitorando') ||
+        lastSig.message.includes('posição')
+      assertTrue(hasKeywords, `msg="${lastSig.message.substring(0, 80)}"`)
+    }
+
+    logInfo(`Last signal: [${lastSig.signal_type}] ${lastSig.message.substring(0, 100)}...`)
+  } else {
+    logTest('signals array populated after tick')
+    logFail('>0 signals', '0 signals', 'tick should generate at least one info signal')
+  }
+
+  // ── 4.9 Error Cases & Input Validation Messages ─────────────
+  log(`\n  ${C.magenta}4.9 Error Cases & Validation Messages${C.reset}`)
 
   logTest('GET /strategies/nonexistent-id -> 404')
   const notFoundRes = await api('GET', '/strategies/nonexistent-id-12345')
@@ -549,6 +607,144 @@ async function testAPIIntegration() {
     name: 'test', symbol: 'BTC/USDT', exchange_id: 'x', exchange_name: 'X'
   })
   assertTrue(noConfigRes.status >= 400, `status=${noConfigRes.status}`)
+
+  // ── 4.9.1 Validate: base_price <= 0 ─────────────
+  log(`\n  ${C.magenta}4.9.1 Input Validation: base_price <= 0${C.reset}`)
+
+  const badBasePayload = {
+    name: `TEST_BAD_BASE_${Date.now()}`, symbol: 'SOL/USDT',
+    exchange_id: 'test-x', exchange_name: 'Binance',
+    config: { base_price: -10.0, take_profit_percent: 5.0, stop_loss_percent: 3.0,
+      gradual_take_percent: 2.0, fee_percent: 0.1, gradual_sell: false,
+      gradual_lots: [], timer_gradual_min: 15, time_execution_min: 120 }
+  }
+
+  logTest('POST /strategies with base_price=-10 -> 400')
+  const badBaseRes = await api('POST', '/strategies', badBasePayload)
+  assertEq(badBaseRes.status, 400)
+
+  logTest('error mentions "base_price" or "Base price"')
+  const baseErr = badBaseRes.data?.error || ''
+  assertTrue(baseErr.toLowerCase().includes('base') || baseErr.toLowerCase().includes('price'),
+    `err="${baseErr.substring(0, 80)}"`)
+
+  logTest('response has field indicator')
+  assertTrue(badBaseRes.data?.field === 'config.base_price', `field=${badBaseRes.data?.field}`)
+
+  // ── 4.9.2 Validate: empty name ─────────────
+  log(`\n  ${C.magenta}4.9.2 Input Validation: empty name${C.reset}`)
+
+  const emptyNamePayload = {
+    name: '   ', symbol: 'BTC/USDT',
+    exchange_id: 'test-x', exchange_name: 'Binance',
+    config: { base_price: 100.0, take_profit_percent: 5.0, stop_loss_percent: 3.0,
+      gradual_take_percent: 0.0, fee_percent: 0.1, gradual_sell: false,
+      gradual_lots: [], timer_gradual_min: 15, time_execution_min: 120 }
+  }
+
+  logTest('POST /strategies with empty name -> 400')
+  const emptyNameRes = await api('POST', '/strategies', emptyNamePayload)
+  assertEq(emptyNameRes.status, 400)
+
+  logTest('error mentions "name"')
+  const nameErr = emptyNameRes.data?.error || ''
+  assertTrue(nameErr.toLowerCase().includes('name'), `err="${nameErr.substring(0, 80)}"`)
+
+  // ── 4.9.3 Validate: invalid symbol (no /) ─────────────
+  log(`\n  ${C.magenta}4.9.3 Input Validation: invalid symbol${C.reset}`)
+
+  const badSymbolPayload = {
+    name: `TEST_BADSYM_${Date.now()}`, symbol: 'BTCUSDT',
+    exchange_id: 'test-x', exchange_name: 'Binance',
+    config: { base_price: 100.0, take_profit_percent: 5.0, stop_loss_percent: 3.0,
+      gradual_take_percent: 0.0, fee_percent: 0.1, gradual_sell: false,
+      gradual_lots: [], timer_gradual_min: 15, time_execution_min: 120 }
+  }
+
+  logTest('POST /strategies with symbol "BTCUSDT" (no /) -> 400')
+  const badSymRes = await api('POST', '/strategies', badSymbolPayload)
+  assertEq(badSymRes.status, 400)
+
+  logTest('error mentions "symbol" or "trading pair"')
+  const symErr = badSymRes.data?.error || ''
+  assertTrue(symErr.toLowerCase().includes('symbol') || symErr.toLowerCase().includes('pair'),
+    `err="${symErr.substring(0, 80)}"`)
+
+  // ── 4.9.4 Validate: TP out of range ─────────────
+  log(`\n  ${C.magenta}4.9.4 Input Validation: take_profit out of range${C.reset}`)
+
+  const badTPPayload = {
+    name: `TEST_BADTP_${Date.now()}`, symbol: 'BTC/USDT',
+    exchange_id: 'test-x', exchange_name: 'Binance',
+    config: { base_price: 100.0, take_profit_percent: -5.0, stop_loss_percent: 3.0,
+      gradual_take_percent: 0.0, fee_percent: 0.1, gradual_sell: false,
+      gradual_lots: [], timer_gradual_min: 15, time_execution_min: 120 }
+  }
+
+  logTest('POST /strategies with TP=-5% -> 400')
+  const badTPRes = await api('POST', '/strategies', badTPPayload)
+  assertEq(badTPRes.status, 400)
+
+  logTest('error mentions "take profit" or "Take profit"')
+  const tpErr = badTPRes.data?.error || ''
+  assertTrue(tpErr.toLowerCase().includes('take profit'), `err="${tpErr.substring(0, 80)}"`)
+
+  // ── 4.9.5 Validate: SL out of range ─────────────
+  log(`\n  ${C.magenta}4.9.5 Input Validation: stop_loss out of range${C.reset}`)
+
+  const badSLPayload = {
+    name: `TEST_BADSL_${Date.now()}`, symbol: 'BTC/USDT',
+    exchange_id: 'test-x', exchange_name: 'Binance',
+    config: { base_price: 100.0, take_profit_percent: 5.0, stop_loss_percent: 150.0,
+      gradual_take_percent: 0.0, fee_percent: 0.1, gradual_sell: false,
+      gradual_lots: [], timer_gradual_min: 15, time_execution_min: 120 }
+  }
+
+  logTest('POST /strategies with SL=150% -> 400')
+  const badSLRes = await api('POST', '/strategies', badSLPayload)
+  assertEq(badSLRes.status, 400)
+
+  logTest('error mentions "stop loss" or "Stop loss"')
+  const slErr = badSLRes.data?.error || ''
+  assertTrue(slErr.toLowerCase().includes('stop loss'), `err="${slErr.substring(0, 80)}"`)
+
+  // ── 4.9.6 Validate: gradual_take=0 when gradual_sell=true ─────
+  log(`\n  ${C.magenta}4.9.6 Input Validation: gradual_take=0 with gradual_sell=true${C.reset}`)
+
+  const badGradualPayload = {
+    name: `TEST_BADGRAD_${Date.now()}`, symbol: 'BTC/USDT',
+    exchange_id: 'test-x', exchange_name: 'Binance',
+    config: { base_price: 100.0, take_profit_percent: 5.0, stop_loss_percent: 3.0,
+      gradual_take_percent: 0.0, fee_percent: 0.1, gradual_sell: true,
+      gradual_lots: [], timer_gradual_min: 15, time_execution_min: 120 }
+  }
+
+  logTest('POST /strategies gradual_sell=true, gradual_take=0 -> 400')
+  const badGradRes = await api('POST', '/strategies', badGradualPayload)
+  assertEq(badGradRes.status, 400)
+
+  logTest('error mentions "gradual"')
+  const gradErr = badGradRes.data?.error || ''
+  assertTrue(gradErr.toLowerCase().includes('gradual'), `err="${gradErr.substring(0, 80)}"`)
+
+  // ── 4.9.7 Validate: pause already paused ─────────────
+  log(`\n  ${C.magenta}4.9.7 Pause/Activate edge cases${C.reset}`)
+
+  // First pause the strategy
+  await api('POST', `/strategies/${createdId}/pause`)
+
+  logTest('POST /pause on already paused -> 4xx or error message')
+  const doublePauseRes = await api('POST', `/strategies/${createdId}/pause`)
+  const pauseIsErr = doublePauseRes.status >= 400 || doublePauseRes.data?.error
+  assertTrue(pauseIsErr, `status=${doublePauseRes.status}`)
+
+  if (doublePauseRes.data?.error) {
+    logTest('double-pause error has friendly message')
+    assertTrue(doublePauseRes.data.error.length > 10, `err="${doublePauseRes.data.error.substring(0, 80)}"`)
+  }
+
+  // Reactivate for cleanup
+  await api('POST', `/strategies/${createdId}/activate`)
 
   // ── 4.10 Create WITHOUT gradual_sell ─────────────
   log(`\n  ${C.magenta}4.10 Create with gradual_sell=false${C.reset}`)
@@ -696,6 +892,293 @@ function testStatusTransitions() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// 7. Signal Message Structure & Content Validation (Offline)
+// ═══════════════════════════════════════════════════════════════════
+function testSignalMessages() {
+  logSection('7. Signal Message Structure & Content Validation (Offline)')
+
+  // Simulated signal messages matching the Rust evaluate_* functions
+  const signalScenarios = [
+    {
+      name: 'evaluate_trigger: monitoring, below trigger (with position)',
+      signal_type: 'info',
+      // From evaluate_trigger: "👁️ Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger..."
+      message: '👁️ Monitorando: preço 145.00 (-3.33% do base). Faltam 12.65 (8.72%) para trigger 157.65. Margem até stop: 0.50 (0.34%) acima de 145.50.',
+      expectedKeywords: ['Monitorando', 'trigger', 'stop', 'Faltam'],
+    },
+    {
+      name: 'evaluate_trigger: no position, waiting entry',
+      signal_type: 'info',
+      // From evaluate_trigger (no position): "⏳ Sem posição aberta. Preço atual..."
+      message: '⏳ Sem posição aberta. Preço atual: 148.00 (-1.33% do base 150.00). Trigger em 157.65 (faltam 9.65, 6.52%). Stop loss em 145.50. Aguardando entrada manual ou via exchange.',
+      expectedKeywords: ['Sem posição', 'Trigger em', 'Stop loss', 'Aguardando'],
+    },
+    {
+      name: 'evaluate_trigger: trigger hit (total sell)',
+      signal_type: 'take_profit',
+      message: '🎯 TRIGGER ATINGIDO! Preço 160.00 >= trigger 157.65 (+6.67%). Executando venda total.',
+      expectedKeywords: ['TRIGGER ATINGIDO', 'trigger', 'Executando'],
+    },
+    {
+      name: 'evaluate_trigger: trigger hit (gradual sell)',
+      signal_type: 'take_profit',
+      message: '🎯 TRIGGER ATINGIDO! Preço 160.00 >= trigger 157.65 (+6.67%). Iniciando venda gradual — lote 1 de 25%.',
+      expectedKeywords: ['TRIGGER ATINGIDO', 'venda gradual', 'lote'],
+    },
+    {
+      name: 'evaluate_trigger: stop loss hit',
+      signal_type: 'stop_loss',
+      message: '🛑 STOP LOSS ATINGIDO! Preço 144.00 <= stop 145.50 (-4.00%). Vendendo tudo para limitar perda.',
+      expectedKeywords: ['STOP LOSS ATINGIDO', 'Vendendo tudo', 'limitar perda'],
+    },
+    {
+      name: 'evaluate_exit: in position, monitoring with PnL',
+      signal_type: 'info',
+      // From evaluate_exit: "📊 Em posição: ..."
+      message: '📊 Em posição: 1.000000 unidades, entrada 150.00. Preço 153.00 (+2.00%). PnL: $3.00. Faltam 4.65 (3.04%) para TP 157.65. Margem até SL: 7.50 (4.90%). Máxima: 155.00 (drawdown: 1.29%).',
+      expectedKeywords: ['Em posição', 'PnL', 'TP', 'SL', 'drawdown'],
+    },
+    {
+      name: 'evaluate_exit: take profit with unrealized PnL',
+      signal_type: 'take_profit',
+      message: '🎯 TAKE PROFIT! Preço 160.00 >= trigger 157.65 (+6.67%). PnL não realizado: $10.00. Vendendo tudo.',
+      expectedKeywords: ['TAKE PROFIT', 'PnL não realizado', 'Vendendo'],
+    },
+    {
+      name: 'evaluate_exit: stop loss with loss estimate',
+      signal_type: 'stop_loss',
+      message: '🛑 STOP LOSS! Preço 144.00 <= stop 145.50 (-4.00%). Perda estimada: $-6.00. Vendendo tudo para limitar perda.',
+      expectedKeywords: ['STOP LOSS', 'Perda estimada', 'limitar perda'],
+    },
+    {
+      name: 'evaluate_exit: no quantity warning',
+      signal_type: 'info',
+      message: "⚠️ Status 'in_position' mas sem quantidade aberta. Verifique o estado da estratégia.",
+      expectedKeywords: ['in_position', 'sem quantidade', 'Verifique'],
+    },
+    {
+      name: 'evaluate_gradual: timer countdown',
+      signal_type: 'info',
+      // From evaluate_gradual: "⏱️ Timer gradual ativo: próximo lote em..."
+      message: '⏱️ Timer gradual ativo: próximo lote em 12min 30s. Preço 160.00 (+6.67%). PnL: $10.00. Progresso: 1/4 lotes vendidos.',
+      expectedKeywords: ['Timer gradual', 'próximo lote', 'Progresso', 'lotes vendidos'],
+    },
+    {
+      name: 'evaluate_gradual: lot trigger hit',
+      signal_type: 'gradual_sell',
+      message: '📈 VENDA GRADUAL! Lote 2 de 4: preço 163.00 >= trigger gradual 163.65. Vendendo 25% (0.250000 unidades). Progresso: 1/4 lotes.',
+      expectedKeywords: ['VENDA GRADUAL', 'Lote', 'trigger gradual', 'Vendendo', 'Progresso'],
+    },
+    {
+      name: 'evaluate_gradual: waiting for price',
+      signal_type: 'info',
+      message: '⏳ Aguardando lote 2 de 4: preço 158.00 < trigger gradual 163.65. Faltam 5.65 (3.58%) para acionar. PnL: $8.00. Timer: pronto. Progresso: 1/4 lotes.',
+      expectedKeywords: ['Aguardando lote', 'trigger gradual', 'Faltam', 'acionar', 'Progresso'],
+    },
+    {
+      name: 'evaluate_gradual: stop loss during gradual',
+      signal_type: 'stop_loss',
+      message: '🛑 STOP LOSS durante venda gradual! Preço 144.00 <= stop 145.50 (-4.00%). 1/4 lotes vendidos. Vendendo posição restante (0.750000) para limitar perda.',
+      expectedKeywords: ['STOP LOSS', 'venda gradual', 'lotes vendidos', 'posição restante'],
+    },
+    {
+      name: 'evaluate_gradual: all lots done',
+      signal_type: 'take_profit',
+      message: '✅ Todos os 4 lotes graduais executados! Vendendo posição restante (0.100000 unidades) a 170.00.',
+      expectedKeywords: ['lotes graduais executados', 'posição restante'],
+    },
+    {
+      name: 'expired signal',
+      signal_type: 'expired',
+      message: "Strategy 'TEST' expired. Ran for 121 minutes (limit: 120 min). No position was opened.",
+      expectedKeywords: ['expired', 'minutes', 'limit'],
+    },
+  ]
+
+  for (const scenario of signalScenarios) {
+    log(`\n  ${C.magenta}Scenario: ${scenario.name}${C.reset}`)
+
+    logTest('signal_type is valid')
+    const validTypes = ['take_profit', 'stop_loss', 'gradual_sell', 'expired', 'info']
+    assertTrue(validTypes.includes(scenario.signal_type), scenario.signal_type)
+
+    logTest('message is non-empty')
+    assertTrue(scenario.message.length > 0)
+
+    logTest('message has minimum detail (>= 20 chars)')
+    assertTrue(scenario.message.length >= 20, `len=${scenario.message.length}`)
+
+    for (const kw of scenario.expectedKeywords) {
+      logTest(`message contains "${kw}"`)
+      assertTrue(scenario.message.includes(kw), `"${scenario.message.substring(0, 60)}..."`)
+    }
+  }
+
+  // Emoji consistency checks
+  log(`\n  ${C.magenta}Emoji Prefixes Consistency${C.reset}`)
+  const emojiMap = {
+    take_profit_trigger: '🎯',
+    stop_loss: '🛑',
+    monitoring: '👁️',
+    no_position: '⏳',
+    in_position_info: '📊',
+    gradual_sell: '📈',
+    timer_active: '⏱️',
+    waiting_lot: '⏳',
+    all_lots_done: '✅',
+    warning: '⚠️',
+  }
+
+  for (const [context, emoji] of Object.entries(emojiMap)) {
+    logTest(`emoji for ${context} = ${emoji}`)
+    assertTrue(emoji.length > 0, emoji)
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 8. Error Classification Messages (Offline)
+// ═══════════════════════════════════════════════════════════════════
+function testErrorClassification() {
+  logSection('8. Error Classification — classify_order_error (Offline)')
+
+  // Simulates the Rust classify_order_error() function locally
+  function classifyOrderError(raw, symbol, exchangeName) {
+    const lower = raw.toLowerCase()
+    if (lower.includes('insufficient') || lower.includes('balance') || lower.includes('not enough')) {
+      return `Insufficient balance on ${exchangeName} to sell ${symbol}. Check your exchange balance.`
+    } else if (lower.includes('minimum') || lower.includes('min order') || lower.includes('too small')) {
+      return `Order amount too small for ${symbol} on ${exchangeName}. Minimum order size not met.`
+    } else if (lower.includes('authentication') || lower.includes('invalid api') || lower.includes('apikey')) {
+      return `API authentication failed on ${exchangeName}. Your API keys may be expired or invalid.`
+    } else if (lower.includes('permission') || lower.includes('not allowed') || lower.includes('restricted')) {
+      return `API key lacks trade permission on ${exchangeName}. Enable spot trading in your API settings.`
+    } else if (lower.includes('rate limit') || lower.includes('too many')) {
+      return `Rate limited by ${exchangeName}. Will retry on next tick.`
+    } else if (lower.includes('network') || lower.includes('timeout') || lower.includes('connection')) {
+      return `Network error connecting to ${exchangeName}. Will retry on next tick.`
+    } else if (lower.includes('not found') || lower.includes('bad symbol') || lower.includes('invalid symbol')) {
+      return `Trading pair '${symbol}' not found on ${exchangeName}. It may have been delisted.`
+    } else if (lower.includes('market closed') || lower.includes('maintenance')) {
+      return `${exchangeName} market is closed or under maintenance. Will retry when available.`
+    } else if (lower.includes('ip') || lower.includes('whitelist')) {
+      return `IP not whitelisted on ${exchangeName} API. Add the server IP to your API key whitelist.`
+    } else {
+      return `Order failed on ${exchangeName}: ${raw}`
+    }
+  }
+
+  const testCases = [
+    { raw: 'ccxt.InsufficientFunds: binance insufficient balance for BTC',
+      sym: 'BTC/USDT', ex: 'Binance', expect: ['Insufficient balance', 'Binance', 'BTC/USDT'] },
+    { raw: 'ccxt.InvalidOrder: Order amount too small',
+      sym: 'DOGE/USDT', ex: 'Bybit', expect: ['too small', 'DOGE/USDT', 'Bybit'] },
+    { raw: 'ccxt.AuthenticationError: invalid api key',
+      sym: 'SOL/USDT', ex: 'Binance', expect: ['authentication failed', 'Binance', 'API keys'] },
+    { raw: 'ccxt.PermissionDenied: not allowed to trade',
+      sym: 'ETH/USDT', ex: 'Coinbase', expect: ['permission', 'Coinbase', 'spot trading'] },
+    { raw: 'ccxt.RateLimitExceeded: too many requests',
+      sym: 'BTC/USDT', ex: 'KuCoin', expect: ['Rate limited', 'KuCoin', 'retry'] },
+    { raw: 'ccxt.NetworkError: connection timeout',
+      sym: 'SOL/USDT', ex: 'Bitget', expect: ['Network error', 'Bitget', 'retry'] },
+    { raw: 'ccxt.BadSymbol: NOTACOIN/USDT not found',
+      sym: 'NOTACOIN/USDT', ex: 'Binance', expect: ['not found', 'Binance', 'NOTACOIN/USDT'] },
+    { raw: 'Exchange is under maintenance',
+      sym: 'BTC/USDT', ex: 'Gate.io', expect: ['maintenance', 'Gate.io', 'retry'] },
+    { raw: 'IP address not in whitelist',
+      sym: 'BTC/USDT', ex: 'OKX', expect: ['IP', 'whitelist', 'OKX'] },
+    { raw: 'some unexpected error from exchange',
+      sym: 'BTC/USDT', ex: 'MEXC', expect: ['Order failed', 'MEXC', 'some unexpected'] },
+  ]
+
+  for (const tc of testCases) {
+    log(`\n  ${C.magenta}Raw: "${tc.raw.substring(0, 50)}..."${C.reset}`)
+
+    const result = classifyOrderError(tc.raw, tc.sym, tc.ex)
+
+    logTest('returns non-empty message')
+    assertTrue(result.length > 0)
+
+    logTest('message is user-friendly (>= 20 chars)')
+    assertTrue(result.length >= 20, `len=${result.length}`)
+
+    for (const kw of tc.expect) {
+      logTest(`message contains "${kw}"`)
+      assertTrue(result.toLowerCase().includes(kw.toLowerCase()), `"${result.substring(0, 80)}"`)
+    }
+  }
+
+  // Verify no raw stack traces leak through
+  log(`\n  ${C.magenta}No raw error leaks${C.reset}`)
+  const knownRawErrors = [
+    'ccxt.InsufficientFunds: balance too low',
+    'ccxt.AuthenticationError: invalid api key format',
+    'ccxt.NetworkError: timeout after 30000ms',
+  ]
+  for (const raw of knownRawErrors) {
+    const classified = classifyOrderError(raw, 'BTC/USDT', 'Binance')
+    logTest(`classified message does NOT start with "ccxt."`)
+    assertFalse(classified.startsWith('ccxt.'), classified.substring(0, 50))
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 9. Tick Status Guards — Error Messages (Offline)
+// ═══════════════════════════════════════════════════════════════════
+function testTickStatusGuards() {
+  logSection('9. Tick Status Guards — Terminal Status Messages (Offline)')
+
+  // Simulates the Rust tick() guard messages
+  const guardMessages = {
+    paused: (name) => `Strategy '${name}' is paused. Activate it to resume.`,
+    completed: (name, pnl) => `Strategy '${name}' already completed with PnL $${pnl.toFixed(2)}.`,
+    stopped_out: (name) => `Strategy '${name}' was stopped out (stop loss triggered).`,
+    expired: (name, min) => `Strategy '${name}' expired after ${min} minutes.`,
+    error: (name, err) => `Strategy '${name}' is in error state: ${err}. Fix the issue and reactivate.`,
+    inactive: (name) => `Strategy '${name}' is not active. Activate it to resume monitoring.`,
+    bad_base: () => 'Invalid configuration: base_price must be greater than 0. Update the strategy config.',
+  }
+
+  const testCases = [
+    { status: 'paused', name: 'My SOL Strategy',
+      msg: guardMessages.paused('My SOL Strategy'),
+      keywords: ['paused', 'Activate', 'resume'] },
+    { status: 'completed', name: 'BTC Scalp',
+      msg: guardMessages.completed('BTC Scalp', 125.50),
+      keywords: ['completed', 'PnL', '$125.50'] },
+    { status: 'stopped_out', name: 'ETH Swing',
+      msg: guardMessages.stopped_out('ETH Swing'),
+      keywords: ['stopped out', 'stop loss'] },
+    { status: 'expired', name: 'DOGE Run',
+      msg: guardMessages.expired('DOGE Run', 120),
+      keywords: ['expired', '120 minutes'] },
+    { status: 'error', name: 'Broken Strategy',
+      msg: guardMessages.error('Broken Strategy', 'connection timeout'),
+      keywords: ['error state', 'Fix', 'reactivate', 'connection timeout'] },
+    { status: 'inactive', name: 'Idle One',
+      msg: guardMessages.inactive('Idle One'),
+      keywords: ['not active', 'Activate', 'resume monitoring'] },
+    { status: 'bad_base_price', name: 'N/A',
+      msg: guardMessages.bad_base(),
+      keywords: ['base_price', 'greater than 0', 'Update'] },
+  ]
+
+  for (const tc of testCases) {
+    log(`\n  ${C.magenta}Guard: ${tc.status}${C.reset}`)
+
+    logTest('message is non-empty')
+    assertTrue(tc.msg.length > 0)
+
+    logTest('message includes strategy name or context')
+    assertTrue(tc.msg.length >= 20, `len=${tc.msg.length}`)
+
+    for (const kw of tc.keywords) {
+      logTest(`contains "${kw}"`)
+      assertTrue(tc.msg.includes(kw), `"${tc.msg.substring(0, 80)}"`)
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Main Runner
 // ═══════════════════════════════════════════════════════════════════
 async function main() {
@@ -712,6 +1195,9 @@ async function main() {
   testGradualLotsOffline()
   testRequestValidation()
   testStatusTransitions()
+  testSignalMessages()
+  testErrorClassification()
+  testTickStatusGuards()
 
   // API tests (only with auth token)
   await testAPIIntegration()

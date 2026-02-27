@@ -48,46 +48,93 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     let strategy_id = strategy.strategy_id.clone();
     let now = chrono::Utc::now().timestamp();
 
+    // ── Guard: inactive strategy ────────────────────────────────────
     if !strategy.is_active {
         return TickResult {
             strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
             signals: vec![], executions: vec![], new_status: None,
-            error: Some("Strategy is not active".into()),
+            error: Some(format!("Strategy '{}' is not active. Activate it to resume monitoring.", strategy.name)),
         };
     }
 
+    // ── Guard: terminal status ──────────────────────────────────────
     match strategy.status {
-        StrategyStatus::Paused | StrategyStatus::Completed
-        | StrategyStatus::StoppedOut | StrategyStatus::Expired | StrategyStatus::Error => {
+        StrategyStatus::Paused => {
             return TickResult {
                 strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
                 signals: vec![], executions: vec![], new_status: None,
-                error: Some(format!("Status '{}' not processable", strategy.status)),
+                error: Some(format!("Strategy '{}' is paused. Activate it to resume.", strategy.name)),
+            };
+        }
+        StrategyStatus::Completed => {
+            return TickResult {
+                strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+                signals: vec![], executions: vec![], new_status: None,
+                error: Some(format!("Strategy '{}' already completed with PnL ${:.2}.", strategy.name, strategy.total_pnl_usd)),
+            };
+        }
+        StrategyStatus::StoppedOut => {
+            return TickResult {
+                strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+                signals: vec![], executions: vec![], new_status: None,
+                error: Some(format!("Strategy '{}' was stopped out (stop loss triggered).", strategy.name)),
+            };
+        }
+        StrategyStatus::Expired => {
+            return TickResult {
+                strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+                signals: vec![], executions: vec![], new_status: None,
+                error: Some(format!("Strategy '{}' expired after {} minutes.", strategy.name, strategy.config.time_execution_min)),
+            };
+        }
+        StrategyStatus::Error => {
+            return TickResult {
+                strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+                signals: vec![], executions: vec![], new_status: None,
+                error: Some(format!("Strategy '{}' is in error state: {}. Fix the issue and reactivate.",
+                    strategy.name, strategy.error_message.as_deref().unwrap_or("unknown error"))),
             };
         }
         _ => {}
     }
 
+    // ── Guard: config validation ────────────────────────────────────
+    if strategy.config.base_price <= 0.0 {
+        return TickResult {
+            strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+            signals: vec![], executions: vec![],
+            new_status: Some(StrategyStatus::Error),
+            error: Some("Invalid configuration: base_price must be greater than 0. Update the strategy config.".into()),
+        };
+    }
+
+    // ── Guard: expiration ───────────────────────────────────────────
     if strategy.is_expired() {
+        let elapsed_min = (now - strategy.started_at) / 60;
         return TickResult {
             strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
             signals: vec![StrategySignal {
                 signal_type: SignalType::Expired, price: 0.0,
-                message: format!("Strategy expired after {}min", strategy.config.time_execution_min),
+                message: format!(
+                    "Strategy '{}' expired. Ran for {} minutes (limit: {} min). No position was opened.",
+                    strategy.name, elapsed_min, strategy.config.time_execution_min
+                ),
                 acted: false, price_change_percent: 0.0, created_at: now,
             }],
             executions: vec![], new_status: Some(StrategyStatus::Expired), error: None,
         };
     }
 
+    // ── Decrypt exchange credentials ────────────────────────────────
     let decrypted = match user_exchanges_service::get_user_exchanges_decrypted(db, user_id).await {
         Ok(ex) => ex,
         Err(e) => {
+            log::error!("❌ [{}] Failed to decrypt exchanges: {}", strategy_id, e);
             return TickResult {
                 strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
                 signals: vec![], executions: vec![],
                 new_status: Some(StrategyStatus::Error),
-                error: Some(format!("Failed to decrypt exchanges: {}", e)),
+                error: Some("Failed to access exchange credentials. Please reconnect your exchange.".into()),
             };
         }
     };
@@ -95,25 +142,54 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     let exchange = match decrypted.iter().find(|ex| ex.exchange_id == strategy.exchange_id) {
         Some(ex) => ex,
         None => {
+            log::error!("❌ [{}] Exchange '{}' not found for user {}", strategy_id, strategy.exchange_id, user_id);
             return TickResult {
                 strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
                 signals: vec![], executions: vec![],
                 new_status: Some(StrategyStatus::Error),
-                error: Some(format!("Exchange {} not found", strategy.exchange_id)),
+                error: Some(format!(
+                    "Exchange '{}' not found or disconnected. Reconnect your exchange and reactivate the strategy.",
+                    strategy.exchange_name
+                )),
             };
         }
     };
 
+    // ── Fetch current price ─────────────────────────────────────────
     let price = match fetch_current_price(
         &exchange.ccxt_id, &exchange.api_key, &exchange.api_secret,
         exchange.passphrase.as_deref(), &strategy.symbol,
     ).await {
-        Ok(p) => p,
-        Err(e) => {
+        Ok(p) if p <= 0.0 => {
             return TickResult {
                 strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
                 signals: vec![], executions: vec![], new_status: None,
-                error: Some(format!("Price fetch failed: {}", e)),
+                error: Some(format!(
+                    "Received invalid price ({}) for {}. The market may be closed or the pair delisted.",
+                    p, strategy.symbol
+                )),
+            };
+        }
+        Ok(p) => p,
+        Err(e) => {
+            let friendly = if e.contains("NetworkError") || e.contains("timeout") {
+                format!("Network error fetching {} price. Will retry on next tick.", strategy.symbol)
+            } else if e.contains("BadSymbol") || e.contains("not found") {
+                format!("Trading pair '{}' not available on {}. Check if the pair is correct.",
+                    strategy.symbol, strategy.exchange_name)
+            } else if e.contains("AuthenticationError") || e.contains("invalid api") {
+                format!("Exchange authentication failed for {}. Check your API keys.",
+                    strategy.exchange_name)
+            } else if e.contains("RateLimitExceeded") || e.contains("rate limit") {
+                format!("Rate limited by {}. Will retry on next tick.", strategy.exchange_name)
+            } else {
+                format!("Failed to fetch price for {}: {}", strategy.symbol, e)
+            };
+            log::warn!("⚠️ [{}] Price fetch: {}", strategy_id, friendly);
+            return TickResult {
+                strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+                signals: vec![], executions: vec![], new_status: None,
+                error: Some(friendly),
             };
         }
     };
@@ -156,6 +232,8 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                             SignalType::GradualSell => "gradual_sell".to_string(),
                             _ => "take_profit".to_string(),
                         };
+                        log::info!("✅ [{}] {} executed: {:.6} {} @ {:.4} | PnL: ${:.2}",
+                            strategy.strategy_id, reason, filled, strategy.symbol, sell_price, pnl - fee);
                         executions.push(StrategyExecution {
                             execution_id: uuid::Uuid::new_v4().to_string(),
                             action: ExecutionAction::Sell, reason: reason.clone(),
@@ -179,13 +257,15 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     }
                     Err(e) => {
                         signal.acted = false;
+                        let friendly = classify_order_error(&e, &strategy.symbol, &strategy.exchange_name);
+                        log::error!("❌ [{}] Sell failed: {} | raw: {}", strategy.strategy_id, friendly, e);
                         executions.push(StrategyExecution {
                             execution_id: uuid::Uuid::new_v4().to_string(),
                             action: ExecutionAction::SellFailed,
-                            reason: format!("sell_failed: {}", e),
+                            reason: format!("sell_failed: {}", friendly),
                             price, amount: sell_amount, total: sell_amount * price,
                             fee: 0.0, pnl_usd: 0.0, exchange_order_id: None,
-                            executed_at: now, error_message: Some(e),
+                            executed_at: now, error_message: Some(friendly),
                         });
                     }
                 }
@@ -201,6 +281,8 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                         let sell_price = order.avg_price.unwrap_or(price);
                         let pnl = (sell_price - entry) * filled;
                         let fee = order.fee.unwrap_or(0.0);
+                        log::warn!("🛑 [{}] STOP LOSS executed: {:.6} {} @ {:.4} | Loss: ${:.2}",
+                            strategy.strategy_id, filled, strategy.symbol, sell_price, pnl - fee);
                         executions.push(StrategyExecution {
                             execution_id: uuid::Uuid::new_v4().to_string(),
                             action: ExecutionAction::Sell, reason: "stop_loss".into(),
@@ -214,13 +296,15 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     }
                     Err(e) => {
                         signal.acted = false;
+                        let friendly = classify_order_error(&e, &strategy.symbol, &strategy.exchange_name);
+                        log::error!("❌ [{}] Stop loss SELL FAILED: {} | raw: {}", strategy.strategy_id, friendly, e);
                         executions.push(StrategyExecution {
                             execution_id: uuid::Uuid::new_v4().to_string(),
                             action: ExecutionAction::SellFailed,
-                            reason: format!("stop_loss_failed: {}", e),
+                            reason: format!("stop_loss_failed: {}", friendly),
                             price, amount: qty, total: qty * price,
                             fee: 0.0, pnl_usd: 0.0, exchange_order_id: None,
-                            executed_at: now, error_message: Some(e),
+                            executed_at: now, error_message: Some(friendly),
                         });
                     }
                 }
@@ -247,34 +331,55 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                 if let Some(lot) = lot {
                     signals.push(StrategySignal {
                         signal_type: SignalType::TakeProfit, price,
-                        message: format!("Trigger {:.2} hit! Gradual lot 1 ({:.0}%)", trigger, lot.sell_percent),
+                        message: format!(
+                            "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%). Iniciando venda gradual — lote {} de {:.0}%.",
+                            price, trigger, pct, lot.lot_number, lot.sell_percent
+                        ),
                         acted: false, price_change_percent: pct, created_at: now,
                     });
                 }
             } else {
                 signals.push(StrategySignal {
                     signal_type: SignalType::TakeProfit, price,
-                    message: format!("Trigger {:.2} hit! Full sell", trigger),
+                    message: format!(
+                        "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%). Executando venda total.",
+                        price, trigger, pct
+                    ),
                     acted: false, price_change_percent: pct, created_at: now,
                 });
             }
         } else if price <= sl_price {
             signals.push(StrategySignal {
                 signal_type: SignalType::StopLoss, price,
-                message: format!("Stop loss {:.2} hit! Price {:.2}", sl_price, price),
+                message: format!(
+                    "🛑 STOP LOSS ATINGIDO! Preço {:.2} <= stop {:.2} ({:+.2}%). Vendendo tudo para limitar perda.",
+                    price, sl_price, pct
+                ),
                 acted: false, price_change_percent: pct, created_at: now,
             });
         } else {
+            let diff_trigger = trigger - price;
+            let diff_trigger_pct = (diff_trigger / price) * 100.0;
+            let diff_sl = price - sl_price;
+            let diff_sl_pct = (diff_sl / price) * 100.0;
             signals.push(StrategySignal {
                 signal_type: SignalType::Info, price,
-                message: format!("Monitoring: {:.2} | trigger={:.2} sl={:.2} ({:+.2}%)", price, trigger, sl_price, pct),
+                message: format!(
+                    "👁️ Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger {:.2}. Margem até stop: {:.2} ({:.2}%) acima de {:.2}.",
+                    price, pct, diff_trigger, diff_trigger_pct, trigger, diff_sl, diff_sl_pct, sl_price
+                ),
                 acted: false, price_change_percent: pct, created_at: now,
             });
         }
     } else {
+        let diff_trigger = trigger - price;
+        let diff_trigger_pct = if price > 0.0 { (diff_trigger / price) * 100.0 } else { 0.0 };
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
-            message: format!("No position. Base={:.2} trigger={:.2} sl={:.2}", config.base_price, trigger, sl_price),
+            message: format!(
+                "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%). Stop loss em {:.2}. Aguardando entrada manual ou via exchange.",
+                price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_price
+            ),
             acted: false, price_change_percent: pct, created_at: now,
         });
     }
@@ -284,14 +389,29 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
     let config = &strategy.config;
     let position = match &strategy.position {
         Some(pos) if pos.quantity > 0.0 => pos,
-        _ => return,
+        _ => {
+            signals.push(StrategySignal {
+                signal_type: SignalType::Info, price,
+                message: "⚠️ Status 'in_position' mas sem quantidade aberta. Verifique o estado da estratégia.".into(),
+                acted: false, price_change_percent: 0.0, created_at: now,
+            });
+            return;
+        }
     };
 
     let entry = position.entry_price;
-    if entry <= 0.0 { return; }
+    if entry <= 0.0 {
+        signals.push(StrategySignal {
+            signal_type: SignalType::Info, price,
+            message: "⚠️ Preço de entrada é 0. Não é possível calcular PnL. Verifique a posição.".into(),
+            acted: false, price_change_percent: 0.0, created_at: now,
+        });
+        return;
+    }
     let pct = ((price - entry) / entry) * 100.0;
     let trigger = config.trigger_price();
     let sl_price = config.stop_loss_price();
+    let unrealized_pnl = (price - entry) * position.quantity;
 
     if price >= trigger {
         if config.gradual_sell && !config.gradual_lots.is_empty() {
@@ -299,33 +419,57 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
             if let Some(lot) = lot {
                 signals.push(StrategySignal {
                     signal_type: SignalType::TakeProfit, price,
-                    message: format!("TP {:.2} hit! Start gradual lot 1 ({:.0}%)", trigger, lot.sell_percent),
+                    message: format!(
+                        "🎯 TAKE PROFIT! Preço {:.2} >= trigger {:.2} ({:+.2}%). PnL não realizado: ${:.2}. Iniciando venda gradual — lote {} ({:.0}%).",
+                        price, trigger, pct, unrealized_pnl, lot.lot_number, lot.sell_percent
+                    ),
                     acted: false, price_change_percent: pct, created_at: now,
                 });
             } else {
                 signals.push(StrategySignal {
                     signal_type: SignalType::TakeProfit, price,
-                    message: "All lots done. Sell remaining".into(),
+                    message: format!(
+                        "🎯 Todos os lotes graduais executados. Vendendo posição restante ({:.6} unidades).",
+                        position.quantity
+                    ),
                     acted: false, price_change_percent: pct, created_at: now,
                 });
             }
         } else {
             signals.push(StrategySignal {
                 signal_type: SignalType::TakeProfit, price,
-                message: format!("TP {:.2} hit! Full sell ({:+.2}%)", trigger, pct),
+                message: format!(
+                    "🎯 TAKE PROFIT! Preço {:.2} >= trigger {:.2} ({:+.2}%). PnL não realizado: ${:.2}. Vendendo tudo.",
+                    price, trigger, pct, unrealized_pnl
+                ),
                 acted: false, price_change_percent: pct, created_at: now,
             });
         }
     } else if price <= sl_price {
         signals.push(StrategySignal {
             signal_type: SignalType::StopLoss, price,
-            message: format!("SL {:.2} hit! Sell all ({:+.2}%)", sl_price, pct),
+            message: format!(
+                "🛑 STOP LOSS! Preço {:.2} <= stop {:.2} ({:+.2}%). Perda estimada: ${:.2}. Vendendo tudo para limitar perda.",
+                price, sl_price, pct, unrealized_pnl
+            ),
             acted: false, price_change_percent: pct, created_at: now,
         });
     } else {
+        let diff_trigger = trigger - price;
+        let diff_trigger_pct = (diff_trigger / price) * 100.0;
+        let diff_sl = price - sl_price;
+        let diff_sl_pct = (diff_sl / price) * 100.0;
+        let highest = position.highest_price;
+        let drawdown = if highest > 0.0 { ((highest - price) / highest) * 100.0 } else { 0.0 };
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
-            message: format!("Holding: {:.2} ({:+.2}%) trigger={:.2} sl={:.2}", price, pct, trigger, sl_price),
+            message: format!(
+                "📊 Em posição: {:.6} unidades, entrada {:.2}. Preço {:.2} ({:+.2}%). PnL: ${:.2}. Faltam {:.2} ({:.2}%) para TP {:.2}. Margem até SL: {:.2} ({:.2}%). Máxima: {:.2} (drawdown: {:.2}%).",
+                position.quantity, entry, price, pct, unrealized_pnl,
+                diff_trigger, diff_trigger_pct, trigger,
+                diff_sl, diff_sl_pct,
+                highest, drawdown
+            ),
             acted: false, price_change_percent: pct, created_at: now,
         });
     }
@@ -335,18 +479,38 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
     let config = &strategy.config;
     let position = match &strategy.position {
         Some(pos) if pos.quantity > 0.0 => pos,
-        _ => return,
+        _ => {
+            signals.push(StrategySignal {
+                signal_type: SignalType::Info, price,
+                message: "⚠️ Status 'gradual_selling' mas sem posição aberta. Todos os lotes podem já ter sido vendidos.".into(),
+                acted: false, price_change_percent: 0.0, created_at: now,
+            });
+            return;
+        }
     };
 
     let entry = position.entry_price;
-    if entry <= 0.0 { return; }
+    if entry <= 0.0 {
+        signals.push(StrategySignal {
+            signal_type: SignalType::Info, price,
+            message: "⚠️ Preço de entrada é 0 durante venda gradual. Verifique a posição.".into(),
+            acted: false, price_change_percent: 0.0, created_at: now,
+        });
+        return;
+    }
     let pct = ((price - entry) / entry) * 100.0;
     let sl_price = config.stop_loss_price();
+    let unrealized_pnl = (price - entry) * position.quantity;
+    let executed_lots = config.gradual_lots.iter().filter(|l| l.executed).count();
+    let total_lots = config.gradual_lots.len();
 
     if price <= sl_price {
         signals.push(StrategySignal {
             signal_type: SignalType::StopLoss, price,
-            message: format!("SL {:.2} during gradual! Sell all ({:+.2}%)", sl_price, pct),
+            message: format!(
+                "🛑 STOP LOSS durante venda gradual! Preço {:.2} <= stop {:.2} ({:+.2}%). {}/{} lotes vendidos. Vendendo posição restante ({:.6}) para limitar perda.",
+                price, sl_price, pct, executed_lots, total_lots, position.quantity
+            ),
             acted: false, price_change_percent: pct, created_at: now,
         });
         return;
@@ -355,10 +519,15 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
     let timer_secs = config.timer_gradual_min * 60;
     let last_sell = strategy.last_gradual_sell_at.unwrap_or(0);
     if now - last_sell < timer_secs {
-        let remaining = timer_secs - (now - last_sell);
+        let remaining_secs = timer_secs - (now - last_sell);
+        let remaining_min = remaining_secs / 60;
+        let remaining_sec = remaining_secs % 60;
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
-            message: format!("Gradual timer: {}s remaining", remaining),
+            message: format!(
+                "⏱️ Timer gradual ativo: próximo lote em {}min {}s. Preço {:.2} ({:+.2}%). PnL: ${:.2}. Progresso: {}/{} lotes vendidos.",
+                remaining_min, remaining_sec, price, pct, unrealized_pnl, executed_lots, total_lots
+            ),
             acted: false, price_change_percent: pct, created_at: now,
         });
         return;
@@ -370,20 +539,23 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             let lot = &config.gradual_lots[idx];
             let gradual_trigger = config.gradual_trigger_price(idx);
             if price >= gradual_trigger {
+                let sell_qty = (position.total_cost / position.entry_price * lot.sell_percent / 100.0).min(position.quantity);
                 signals.push(StrategySignal {
                     signal_type: SignalType::GradualSell, price,
                     message: format!(
-                        "Gradual lot {} ({:.0}%): {:.2} >= {:.2}",
-                        lot.lot_number, lot.sell_percent, price, gradual_trigger
+                        "📈 VENDA GRADUAL! Lote {} de {}: preço {:.2} >= trigger gradual {:.2}. Vendendo {:.0}% ({:.6} unidades). Progresso: {}/{} lotes.",
+                        lot.lot_number, total_lots, price, gradual_trigger, lot.sell_percent, sell_qty, executed_lots, total_lots
                     ),
                     acted: false, price_change_percent: pct, created_at: now,
                 });
             } else {
+                let diff = gradual_trigger - price;
+                let diff_pct = (diff / price) * 100.0;
                 signals.push(StrategySignal {
                     signal_type: SignalType::Info, price,
                     message: format!(
-                        "Gradual wait: lot {} needs {:.2}, price={:.2}",
-                        lot.lot_number, gradual_trigger, price
+                        "⏳ Aguardando lote {} de {}: preço {:.2} < trigger gradual {:.2}. Faltam {:.2} ({:.2}%) para acionar. PnL: ${:.2}. Timer: pronto. Progresso: {}/{} lotes.",
+                        lot.lot_number, total_lots, price, gradual_trigger, diff, diff_pct, unrealized_pnl, executed_lots, total_lots
                     ),
                     acted: false, price_change_percent: pct, created_at: now,
                 });
@@ -392,7 +564,10 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
         None => {
             signals.push(StrategySignal {
                 signal_type: SignalType::TakeProfit, price,
-                message: "All gradual lots done. Sell remaining".into(),
+                message: format!(
+                    "✅ Todos os {} lotes graduais executados! Vendendo posição restante ({:.6} unidades) a {:.2}.",
+                    total_lots, position.quantity, price
+                ),
                 acted: false, price_change_percent: pct, created_at: now,
             });
         }
@@ -450,6 +625,32 @@ pub struct OrderResult {
     pub avg_price: Option<f64>,
     pub cost: Option<f64>,
     pub fee: Option<f64>,
+}
+
+/// Classify raw CCXT/exchange errors into user-friendly messages
+fn classify_order_error(raw: &str, symbol: &str, exchange_name: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("insufficient") || lower.contains("balance") || lower.contains("not enough") {
+        format!("Insufficient balance on {} to sell {}. Check your exchange balance.", exchange_name, symbol)
+    } else if lower.contains("minimum") || lower.contains("min order") || lower.contains("too small") {
+        format!("Order amount too small for {} on {}. Minimum order size not met.", symbol, exchange_name)
+    } else if lower.contains("authentication") || lower.contains("invalid api") || lower.contains("apikey") {
+        format!("API authentication failed on {}. Your API keys may be expired or invalid.", exchange_name)
+    } else if lower.contains("permission") || lower.contains("not allowed") || lower.contains("restricted") {
+        format!("API key lacks trade permission on {}. Enable spot trading in your API settings.", exchange_name)
+    } else if lower.contains("rate limit") || lower.contains("too many") {
+        format!("Rate limited by {}. Will retry on next tick.", exchange_name)
+    } else if lower.contains("network") || lower.contains("timeout") || lower.contains("connection") {
+        format!("Network error connecting to {}. Will retry on next tick.", exchange_name)
+    } else if lower.contains("not found") || lower.contains("bad symbol") || lower.contains("invalid symbol") {
+        format!("Trading pair '{}' not found on {}. It may have been delisted.", symbol, exchange_name)
+    } else if lower.contains("market closed") || lower.contains("maintenance") {
+        format!("{} market is closed or under maintenance. Will retry when available.", exchange_name)
+    } else if lower.contains("ip") || lower.contains("whitelist") {
+        format!("IP not whitelisted on {} API. Add the server IP to your API key whitelist.", exchange_name)
+    } else {
+        format!("Order failed on {}: {}", exchange_name, raw)
+    }
 }
 
 async fn execute_order(
@@ -672,8 +873,28 @@ pub async fn persist_tick_result(
 
 pub async fn activate_strategy(db: &MongoDB, strategy_id: &str, user_id: &str) -> Result<StrategyItem, String> {
     let collection = db.collection::<UserStrategies>(COLLECTION);
+
+    // ── Pre-check: find the strategy and validate ───────────────────
+    let user_doc = collection.find_one(doc! { "user_id": user_id }).await
+        .map_err(|e| format!("Failed to access database: {}", e))?
+        .ok_or_else(|| "No strategies found for your account.".to_string())?;
+
+    let strategy = user_doc.strategies.iter()
+        .find(|s| s.strategy_id == strategy_id)
+        .ok_or_else(|| "Strategy not found. It may have been deleted.".to_string())?;
+
+    if strategy.is_active && strategy.status == StrategyStatus::Monitoring {
+        return Err(format!("Strategy '{}' is already active and monitoring.", strategy.name));
+    }
+
+    if strategy.config.base_price <= 0.0 {
+        return Err("Cannot activate: base price is 0 or invalid. Update the strategy configuration first.".to_string());
+    }
+
     let now = chrono::Utc::now().timestamp();
     let p = "strategies.$[elem]";
+
+    log::info!("▶️ Activating strategy '{}' ({}) for user {}", strategy.name, strategy_id, user_id);
 
     collection.update_one(
         doc! { "user_id": user_id },
@@ -685,21 +906,47 @@ pub async fn activate_strategy(db: &MongoDB, strategy_id: &str, user_id: &str) -
             "updated_at": now,
         }},
     ).array_filters(vec![doc! { "elem.strategy_id": strategy_id }]).await
-        .map_err(|e| format!("Failed to activate: {}", e))?;
+        .map_err(|e| format!("Failed to activate strategy: {}", e))?;
 
     let user_doc = collection.find_one(doc! { "user_id": user_id }).await
-        .map_err(|e| format!("Failed to fetch: {}", e))?
-        .ok_or_else(|| "User strategies not found".to_string())?;
+        .map_err(|e| format!("Failed to fetch updated strategy: {}", e))?
+        .ok_or_else(|| "Strategy activated but failed to retrieve updated data.".to_string())?;
 
     user_doc.strategies.into_iter()
         .find(|s| s.strategy_id == strategy_id)
-        .ok_or_else(|| "Strategy not found".to_string())
+        .ok_or_else(|| "Strategy activated but not found in response.".to_string())
 }
 
 pub async fn pause_strategy(db: &MongoDB, strategy_id: &str, user_id: &str) -> Result<StrategyItem, String> {
     let collection = db.collection::<UserStrategies>(COLLECTION);
+
+    // ── Pre-check ───────────────────────────────────────────────────
+    let user_doc = collection.find_one(doc! { "user_id": user_id }).await
+        .map_err(|e| format!("Failed to access database: {}", e))?
+        .ok_or_else(|| "No strategies found for your account.".to_string())?;
+
+    let strategy = user_doc.strategies.iter()
+        .find(|s| s.strategy_id == strategy_id)
+        .ok_or_else(|| "Strategy not found. It may have been deleted.".to_string())?;
+
+    if !strategy.is_active || strategy.status == StrategyStatus::Paused {
+        return Err(format!("Strategy '{}' is already paused.", strategy.name));
+    }
+
+    match strategy.status {
+        StrategyStatus::Completed | StrategyStatus::StoppedOut | StrategyStatus::Expired => {
+            return Err(format!(
+                "Cannot pause strategy '{}' — it is already in terminal state '{}'. Create a new strategy instead.",
+                strategy.name, strategy.status
+            ));
+        }
+        _ => {}
+    }
+
     let now = chrono::Utc::now().timestamp();
     let p = "strategies.$[elem]";
+
+    log::info!("⏸️ Pausing strategy '{}' ({}) for user {}", strategy.name, strategy_id, user_id);
 
     collection.update_one(
         doc! { "user_id": user_id },
@@ -710,15 +957,15 @@ pub async fn pause_strategy(db: &MongoDB, strategy_id: &str, user_id: &str) -> R
             "updated_at": now,
         }},
     ).array_filters(vec![doc! { "elem.strategy_id": strategy_id }]).await
-        .map_err(|e| format!("Failed to pause: {}", e))?;
+        .map_err(|e| format!("Failed to pause strategy: {}", e))?;
 
     let user_doc = collection.find_one(doc! { "user_id": user_id }).await
-        .map_err(|e| format!("Failed to fetch: {}", e))?
-        .ok_or_else(|| "User strategies not found".to_string())?;
+        .map_err(|e| format!("Failed to fetch updated strategy: {}", e))?
+        .ok_or_else(|| "Strategy paused but failed to retrieve updated data.".to_string())?;
 
     user_doc.strategies.into_iter()
         .find(|s| s.strategy_id == strategy_id)
-        .ok_or_else(|| "Strategy not found".to_string())
+        .ok_or_else(|| "Strategy paused but not found in response.".to_string())
 }
 
 pub async fn process_active_strategies(db: &MongoDB) -> Result<ProcessResult, String> {

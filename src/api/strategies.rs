@@ -115,7 +115,96 @@ pub async fn get_strategy_signals(user: web::ReqData<Claims>, path: web::Path<St
 #[post("")]
 pub async fn create_strategy(user: web::ReqData<Claims>, body: web::Json<CreateStrategyRequest>, db: web::Data<MongoDB>) -> impl Responder {
     let user_id = &user.sub;
+    log::info!("📝 POST /strategies - user: {}, name: '{}', symbol: '{}'", user_id, body.name, body.symbol);
+
+    // ── Input Validation ────────────────────────────────────────────
+    if body.name.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Strategy name is required",
+            "field": "name"
+        }));
+    }
+    if body.name.len() > 100 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Strategy name must be at most 100 characters",
+            "field": "name"
+        }));
+    }
+    if body.symbol.trim().is_empty() || !body.symbol.contains('/') {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Symbol must be a valid trading pair (e.g. BTC/USDT)",
+            "field": "symbol"
+        }));
+    }
+    if body.exchange_id.trim().is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Exchange ID is required",
+            "field": "exchange_id"
+        }));
+    }
+    if body.config.base_price <= 0.0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Base price must be greater than 0",
+            "field": "config.base_price"
+        }));
+    }
+    if body.config.take_profit_percent <= 0.0 || body.config.take_profit_percent > 1000.0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Take profit must be between 0.01% and 1000%",
+            "field": "config.take_profit_percent"
+        }));
+    }
+    if body.config.stop_loss_percent <= 0.0 || body.config.stop_loss_percent > 100.0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Stop loss must be between 0.01% and 100%",
+            "field": "config.stop_loss_percent"
+        }));
+    }
+    if body.config.fee_percent < 0.0 || body.config.fee_percent > 50.0 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Fee must be between 0% and 50%",
+            "field": "config.fee_percent"
+        }));
+    }
+    if body.config.gradual_sell && (body.config.gradual_take_percent <= 0.0 || body.config.gradual_take_percent > 100.0) {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Gradual take percent must be between 0.01% and 100% when gradual sell is enabled",
+            "field": "config.gradual_take_percent"
+        }));
+    }
+    if body.config.time_execution_min < 1 || body.config.time_execution_min > 43200 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Execution time must be between 1 minute and 30 days (43200 min)",
+            "field": "config.time_execution_min"
+        }));
+    }
+    if body.config.timer_gradual_min < 1 || body.config.timer_gradual_min > 1440 {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false, "error": "Gradual timer must be between 1 minute and 24 hours (1440 min)",
+            "field": "config.timer_gradual_min"
+        }));
+    }
+
+    // ── Limit check: max 20 strategies per user ─────────────────────
     let collection = db.collection::<UserStrategies>(COLLECTION);
+    match get_or_create_user_doc(&db, user_id).await {
+        Ok(ud) => {
+            let active_count = ud.strategies.iter().filter(|s| s.is_active).count();
+            if active_count >= 20 {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "success": false, "error": "Maximum of 20 active strategies reached. Pause or delete existing strategies first.",
+                    "limit": 20, "current": active_count
+                }));
+            }
+        }
+        Err(e) => {
+            log::error!("❌ Failed to check strategy limit for user {}: {}", user_id, e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false, "error": "Failed to verify strategy limit. Please try again."
+            }));
+        }
+    }
+
     let now = chrono::Utc::now().timestamp();
     let strategy_id = uuid::Uuid::new_v4().to_string();
     let mut config = body.config.clone();
@@ -218,16 +307,60 @@ pub async fn pause_strategy(user: web::ReqData<Claims>, path: web::Path<String>,
 pub async fn tick_strategy(user: web::ReqData<Claims>, path: web::Path<String>, db: web::Data<MongoDB>) -> impl Responder {
     let sid = path.into_inner();
     let uid = &user.sub;
+    log::info!("⚡ POST /strategies/{}/tick - user: {}", sid, uid);
+
     let ud = match get_or_create_user_doc(&db, uid).await {
         Ok(d) => d,
-        Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e })),
+        Err(e) => {
+            log::error!("❌ Tick failed (DB): user={}, strategy={}, error={}", uid, sid, e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": "Failed to load strategies. Please try again later."
+            }));
+        }
     };
     let strategy = match ud.strategies.into_iter().find(|s| s.strategy_id == sid) {
         Some(s) => s,
-        None => return HttpResponse::NotFound().json(serde_json::json!({ "success": false, "error": "Strategy not found" })),
+        None => {
+            log::warn!("⚠️ Tick: strategy {} not found for user {}", sid, uid);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": "Strategy not found. It may have been deleted."
+            }));
+        }
     };
+
+    if !strategy.is_active {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "error": format!("Strategy '{}' is not active (status: {}). Activate it first.", strategy.name, strategy.status)
+        }));
+    }
+
     let tr = strategy_service::tick(&db, uid, &strategy).await;
-    let _ = strategy_service::persist_tick_result(&db, uid, &strategy, &tr).await;
+
+    if let Err(e) = strategy_service::persist_tick_result(&db, uid, &strategy, &tr).await {
+        log::error!("❌ Tick persist failed: strategy={}, error={}", sid, e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "error": "Tick executed but failed to save results. Data may be inconsistent.",
+            "tick": {
+                "strategy_id": tr.strategy_id, "symbol": tr.symbol, "price": tr.price,
+                "signals_count": tr.signals.len(), "error": tr.error,
+            }
+        }));
+    }
+
+    let has_error = tr.error.is_some();
+    let status_changed = tr.new_status.is_some();
+
+    if has_error {
+        log::warn!("⚠️ Tick warning: strategy={}, symbol={}, error={}", sid, tr.symbol, tr.error.as_deref().unwrap_or("unknown"));
+    } else if status_changed {
+        log::info!("📊 Tick status change: strategy={}, symbol={}, price={:.4}, new_status={:?}, signals={}, execs={}",
+            sid, tr.symbol, tr.price, tr.new_status, tr.signals.len(), tr.executions.len());
+    }
+
     HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "tick": {

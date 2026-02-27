@@ -697,7 +697,7 @@ async fn execute_order(
 }
 
 pub async fn persist_tick_result(
-    db: &MongoDB, user_id: &str, strategy: &StrategyItem, result: &TickResult,
+    db: &MongoDB, user_id: &str, strategy: &StrategyItem, result: &TickResult, manual: bool,
 ) -> Result<(), String> {
     let collection = db.collection::<UserStrategies>(COLLECTION);
     let now = chrono::Utc::now().timestamp();
@@ -846,8 +846,19 @@ pub async fn persist_tick_result(
     ).array_filters(vec![array_filter.clone()]).await
         .map_err(|e| format!("Failed to persist tick: {}", e))?;
 
+    // ── Persist signals ─────────────────────────────────────────────
+    // When automatic (monitor), only save actionable signals (TP, SL, GradualSell, Expired)
+    // to avoid inflating MongoDB with "monitoring..." info logs every 30s.
+    // When manual (user clicked Tick), save ALL signals including Info.
     if !result.signals.is_empty() {
-        let signals_bson: Vec<mongodb::bson::Bson> = result.signals.iter()
+        let signals_to_save: Vec<&StrategySignal> = if manual {
+            result.signals.iter().collect()
+        } else {
+            result.signals.iter()
+                .filter(|s| !matches!(s.signal_type, SignalType::Info))
+                .collect()
+        };
+        let signals_bson: Vec<mongodb::bson::Bson> = signals_to_save.iter()
             .filter_map(|s| mongodb::bson::to_bson(s).ok()).collect();
         if !signals_bson.is_empty() {
             let _ = collection.update_one(
@@ -1010,7 +1021,7 @@ pub async fn process_active_strategies(db: &MongoDB) -> Result<ProcessResult, St
                     signals_generated += tick_result.signals.len();
                     orders_executed += tick_result.executions.len();
 
-                    match persist_tick_result(db, &user_id, strategy, &tick_result).await {
+                    match persist_tick_result(db, &user_id, strategy, &tick_result, false).await {
                         Ok(_) => processed += 1,
                         Err(e) => {
                             log::error!("[Strategy {}] Persist failed: {}", tick_result.strategy_id, e);

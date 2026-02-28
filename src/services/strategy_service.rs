@@ -220,6 +220,35 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 let sell_amount = calc_sell_amount(strategy, &signal.signal_type);
                 if sell_amount <= 0.0 { continue; }
 
+                // ── Double-check: se invested_amount preenchido, verificar lucro real ──
+                // Garante que o valor atual do investimento é REALMENTE maior que o investido.
+                // Protege contra slippage, fees inesperadas, ou pequenas variações de preço.
+                let config = &strategy.config;
+                if config.invested_amount > 0.0 && config.base_price > 0.0 {
+                    let estimated_qty = config.invested_amount / config.base_price;
+                    let current_value = estimated_qty * price;
+                    let estimated_pnl = current_value - config.invested_amount;
+                    if estimated_pnl <= 0.0 {
+                        log::warn!(
+                            "⚠️ [{}] DOUBLE-CHECK: trigger atingido mas investimento NÃO dá lucro real! \
+                            Investido: ${:.2}, Valor atual: ${:.2}, PnL estimado: ${:.2}. Venda BLOQUEADA — aguardando preço melhor.",
+                            strategy.strategy_id, config.invested_amount, current_value, estimated_pnl
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ DOUBLE-CHECK: Trigger atingido (preço {:.2}) mas investimento de ${:.2} \
+                            valeria ${:.2} agora (PnL: {:+.2}$). Venda bloqueada — aguardando lucro real.",
+                            price, config.invested_amount, current_value, estimated_pnl
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
+                    log::info!(
+                        "✅ [{}] DOUBLE-CHECK OK: Investido ${:.2} → atual ${:.2} (lucro: +${:.2}). Prosseguindo com venda.",
+                        strategy.strategy_id, config.invested_amount, current_value, estimated_pnl
+                    );
+                }
+
                 match execute_order(exchange, &strategy.symbol, "market", "sell", sell_amount, None).await {
                     Ok(order) => {
                         signal.acted = true;
@@ -324,6 +353,16 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
     let sl_price = config.stop_loss_price();
     let pct = ((price - config.base_price) / config.base_price) * 100.0;
 
+    // PnL estimado em $ (se invested_amount preenchido)
+    let pnl_info = match config.estimated_pnl(price) {
+        Some(pnl) => format!(" Investimento: ${:.2} → atual ${:.2} (PnL: {:+.2}$)",
+            config.invested_amount,
+            config.invested_amount + pnl,
+            pnl
+        ),
+        None => String::new(),
+    };
+
     if strategy.position.is_some() {
         if price >= trigger {
             if config.gradual_sell && !config.gradual_lots.is_empty() {
@@ -332,8 +371,8 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                     signals.push(StrategySignal {
                         signal_type: SignalType::TakeProfit, price,
                         message: format!(
-                            "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%). Iniciando venda gradual — lote {} de {:.0}%.",
-                            price, trigger, pct, lot.lot_number, lot.sell_percent
+                            "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%).{} Iniciando venda gradual — lote {} de {:.0}%.",
+                            price, trigger, pct, pnl_info, lot.lot_number, lot.sell_percent
                         ),
                         acted: false, price_change_percent: pct, created_at: now,
                     });
@@ -342,8 +381,8 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                 signals.push(StrategySignal {
                     signal_type: SignalType::TakeProfit, price,
                     message: format!(
-                        "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%). Executando venda total.",
-                        price, trigger, pct
+                        "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%).{} Executando venda total.",
+                        price, trigger, pct, pnl_info
                     ),
                     acted: false, price_change_percent: pct, created_at: now,
                 });
@@ -352,8 +391,8 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             signals.push(StrategySignal {
                 signal_type: SignalType::StopLoss, price,
                 message: format!(
-                    "🛑 STOP LOSS ATINGIDO! Preço {:.2} <= stop {:.2} ({:+.2}%). Vendendo tudo para limitar perda.",
-                    price, sl_price, pct
+                    "🛑 STOP LOSS ATINGIDO! Preço {:.2} <= stop {:.2} ({:+.2}%).{} Vendendo tudo para limitar perda.",
+                    price, sl_price, pct, pnl_info
                 ),
                 acted: false, price_change_percent: pct, created_at: now,
             });
@@ -365,8 +404,8 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             signals.push(StrategySignal {
                 signal_type: SignalType::Info, price,
                 message: format!(
-                    "👁️ Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger {:.2}. Margem até stop: {:.2} ({:.2}%) acima de {:.2}.",
-                    price, pct, diff_trigger, diff_trigger_pct, trigger, diff_sl, diff_sl_pct, sl_price
+                    "👁️ Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger {:.2}. Margem até stop: {:.2} ({:.2}%) acima de {:.2}.{}",
+                    price, pct, diff_trigger, diff_trigger_pct, trigger, diff_sl, diff_sl_pct, sl_price, pnl_info
                 ),
                 acted: false, price_change_percent: pct, created_at: now,
             });
@@ -377,8 +416,8 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
             message: format!(
-                "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%). Stop loss em {:.2}. Aguardando entrada manual ou via exchange.",
-                price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_price
+                "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%). Stop loss em {:.2}.{} Aguardando entrada manual ou via exchange.",
+                price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_price, pnl_info
             ),
             acted: false, price_change_percent: pct, created_at: now,
         });

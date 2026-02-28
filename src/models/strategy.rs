@@ -51,7 +51,13 @@ pub struct GradualLot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
+    /// Preço unitário da moeda no momento da compra (ex: SOL a $140).
+    /// Usado para calcular trigger (TP), stop loss e % de variação.
     pub base_price: f64,
+    /// Valor total investido em USDT (ex: $36). Opcional — usado para
+    /// calcular PnL estimado em dólares nos sinais e logs.
+    #[serde(default)]
+    pub invested_amount: f64,
     pub take_profit_percent: f64,
     pub stop_loss_percent: f64,
     pub gradual_take_percent: f64,
@@ -73,6 +79,7 @@ impl Default for StrategyConfig {
     fn default() -> Self {
         StrategyConfig {
             base_price: 0.0,
+            invested_amount: 0.0,
             take_profit_percent: 10.0,
             stop_loss_percent: 5.0,
             gradual_take_percent: 2.0,
@@ -101,6 +108,28 @@ impl StrategyConfig {
         let fee = self.fee_percent / 100.0;
         let gradual_step = self.gradual_take_percent / 100.0;
         self.base_price * (1.0 + base_tp + fee + gradual_step * lot_index as f64)
+    }
+
+    /// Calcula a quantidade estimada de moedas com base no investimento.
+    /// Ex: invested $36, base_price $140 → 0.2571 moedas
+    pub fn estimated_quantity(&self) -> f64 {
+        if self.invested_amount > 0.0 && self.base_price > 0.0 {
+            self.invested_amount / self.base_price
+        } else {
+            0.0
+        }
+    }
+
+    /// Calcula PnL estimado em $ baseado no invested_amount e variação de preço.
+    /// Ex: invested $36, preço subiu 10% → PnL estimado = +$3.60
+    pub fn estimated_pnl(&self, current_price: f64) -> Option<f64> {
+        if self.invested_amount > 0.0 && self.base_price > 0.0 {
+            let qty = self.invested_amount / self.base_price;
+            let current_value = qty * current_price;
+            Some(current_value - self.invested_amount)
+        } else {
+            None
+        }
     }
 }
 

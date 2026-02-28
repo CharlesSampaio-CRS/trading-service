@@ -59,6 +59,10 @@ pub struct StrategyConfig {
     #[serde(default)]
     pub invested_amount: f64,
     pub take_profit_percent: f64,
+    /// Se false, stop loss é completamente desativado — a estratégia nunca
+    /// vende por queda de preço. Útil para hold de longo prazo.
+    #[serde(default = "default_true")]
+    pub stop_loss_enabled: bool,
     pub stop_loss_percent: f64,
     pub gradual_take_percent: f64,
     pub fee_percent: f64,
@@ -81,6 +85,7 @@ impl Default for StrategyConfig {
             base_price: 0.0,
             invested_amount: 0.0,
             take_profit_percent: 10.0,
+            stop_loss_enabled: true,
             stop_loss_percent: 5.0,
             gradual_take_percent: 2.0,
             fee_percent: 0.5,

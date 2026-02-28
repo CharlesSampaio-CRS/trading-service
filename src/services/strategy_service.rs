@@ -387,7 +387,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                     acted: false, price_change_percent: pct, created_at: now,
                 });
             }
-        } else if price <= sl_price {
+        } else if config.stop_loss_enabled && price <= sl_price {
             signals.push(StrategySignal {
                 signal_type: SignalType::StopLoss, price,
                 message: format!(
@@ -404,8 +404,14 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             signals.push(StrategySignal {
                 signal_type: SignalType::Info, price,
                 message: format!(
-                    "👁️ Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger {:.2}. Margem até stop: {:.2} ({:.2}%) acima de {:.2}.{}",
-                    price, pct, diff_trigger, diff_trigger_pct, trigger, diff_sl, diff_sl_pct, sl_price, pnl_info
+                    "👁️ Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger {:.2}.{}{}",
+                    price, pct, diff_trigger, diff_trigger_pct, trigger,
+                    if config.stop_loss_enabled {
+                        format!(" Margem até stop: {:.2} ({:.2}%) acima de {:.2}.", diff_sl, diff_sl_pct, sl_price)
+                    } else {
+                        " Stop loss desativado.".to_string()
+                    },
+                    pnl_info
                 ),
                 acted: false, price_change_percent: pct, created_at: now,
             });
@@ -413,11 +419,16 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
     } else {
         let diff_trigger = trigger - price;
         let diff_trigger_pct = if price > 0.0 { (diff_trigger / price) * 100.0 } else { 0.0 };
+        let sl_info = if config.stop_loss_enabled {
+            format!(" Stop loss em {:.2}.", sl_price)
+        } else {
+            " Stop loss desativado.".to_string()
+        };
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
             message: format!(
-                "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%). Stop loss em {:.2}.{} Aguardando entrada manual ou via exchange.",
-                price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_price, pnl_info
+                "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%).{}{} Aguardando entrada manual ou via exchange.",
+                price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_info, pnl_info
             ),
             acted: false, price_change_percent: pct, created_at: now,
         });
@@ -484,7 +495,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
                 acted: false, price_change_percent: pct, created_at: now,
             });
         }
-    } else if price <= sl_price {
+    } else if config.stop_loss_enabled && price <= sl_price {
         signals.push(StrategySignal {
             signal_type: SignalType::StopLoss, price,
             message: format!(
@@ -500,13 +511,18 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
         let diff_sl_pct = (diff_sl / price) * 100.0;
         let highest = position.highest_price;
         let drawdown = if highest > 0.0 { ((highest - price) / highest) * 100.0 } else { 0.0 };
+        let sl_msg = if config.stop_loss_enabled {
+            format!(" Margem até SL: {:.2} ({:.2}%).", diff_sl, diff_sl_pct)
+        } else {
+            " SL desativado.".to_string()
+        };
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
             message: format!(
-                "📊 Em posição: {:.6} unidades, entrada {:.2}. Preço {:.2} ({:+.2}%). PnL: ${:.2}. Faltam {:.2} ({:.2}%) para TP {:.2}. Margem até SL: {:.2} ({:.2}%). Máxima: {:.2} (drawdown: {:.2}%).",
+                "📊 Em posição: {:.6} unidades, entrada {:.2}. Preço {:.2} ({:+.2}%). PnL: ${:.2}. Faltam {:.2} ({:.2}%) para TP {:.2}.{} Máxima: {:.2} (drawdown: {:.2}%).",
                 position.quantity, entry, price, pct, unrealized_pnl,
                 diff_trigger, diff_trigger_pct, trigger,
-                diff_sl, diff_sl_pct,
+                sl_msg,
                 highest, drawdown
             ),
             acted: false, price_change_percent: pct, created_at: now,
@@ -543,7 +559,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
     let executed_lots = config.gradual_lots.iter().filter(|l| l.executed).count();
     let total_lots = config.gradual_lots.len();
 
-    if price <= sl_price {
+    if config.stop_loss_enabled && price <= sl_price {
         signals.push(StrategySignal {
             signal_type: SignalType::StopLoss, price,
             message: format!(

@@ -19,7 +19,6 @@ use utoipa_swagger_ui::SwaggerUi;
 async fn main() -> std::io::Result<()> {
     // Load environment variables
     dotenv().ok();
-    
     // Initialize logger
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
     

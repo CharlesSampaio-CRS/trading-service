@@ -149,7 +149,7 @@ pub async fn create_strategy(user: web::ReqData<Claims>, body: web::Json<CreateS
             "field": "config.take_profit_percent"
         }));
     }
-    if body.config.stop_loss_percent <= 0.0 || body.config.stop_loss_percent > 100.0 {
+    if body.config.stop_loss_enabled && (body.config.stop_loss_percent <= 0.0 || body.config.stop_loss_percent > 100.0) {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "success": false, "error": "Stop loss must be between 0.01% and 100%",
             "field": "config.stop_loss_percent"

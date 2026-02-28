@@ -6,7 +6,7 @@ use crate::models::{
     StrategyResponse, StrategyListItem, StrategyStatus, GradualLot, StrategySignal,
 };
 use crate::middleware::auth::Claims;
-use crate::services::strategy_service;
+use crate::services::{strategy_service, user_exchanges_service};
 
 const COLLECTION: &str = "user_strategy";
 
@@ -142,12 +142,7 @@ pub async fn create_strategy(user: web::ReqData<Claims>, body: web::Json<CreateS
             "field": "exchange_id"
         }));
     }
-    if body.config.base_price <= 0.0 {
-        return HttpResponse::BadRequest().json(serde_json::json!({
-            "success": false, "error": "Base price must be greater than 0",
-            "field": "config.base_price"
-        }));
-    }
+    // base_price <= 0 é permitido — será buscado automaticamente da exchange
     if body.config.take_profit_percent <= 0.0 || body.config.take_profit_percent > 1000.0 {
         return HttpResponse::BadRequest().json(serde_json::json!({
             "success": false, "error": "Take profit must be between 0.01% and 1000%",
@@ -208,6 +203,58 @@ pub async fn create_strategy(user: web::ReqData<Claims>, body: web::Json<CreateS
     let now = chrono::Utc::now().timestamp();
     let strategy_id = uuid::Uuid::new_v4().to_string();
     let mut config = body.config.clone();
+
+    // ── Auto-fetch base_price da exchange se não informado ──────────
+    if config.base_price <= 0.0 {
+        log::info!("💰 base_price não informado — buscando preço atual de {} na exchange {}", body.symbol, body.exchange_id);
+        match user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+            Ok(exchanges) => {
+                match exchanges.iter().find(|e| e.exchange_id == body.exchange_id) {
+                    Some(ex) => {
+                        match strategy_service::fetch_current_price(
+                            &ex.ccxt_id, &ex.api_key, &ex.api_secret,
+                            ex.passphrase.as_deref(), &body.symbol,
+                        ).await {
+                            Ok(price) if price > 0.0 => {
+                                log::info!("✅ Preço atual de {} = ${:.4} — usando como base_price", body.symbol, price);
+                                config.base_price = price;
+                            }
+                            Ok(_) => {
+                                return HttpResponse::BadRequest().json(serde_json::json!({
+                                    "success": false,
+                                    "error": format!("Não foi possível obter o preço de {}. Informe o preço base manualmente.", body.symbol),
+                                    "field": "config.base_price"
+                                }));
+                            }
+                            Err(e) => {
+                                log::error!("❌ Erro ao buscar preço de {}: {}", body.symbol, e);
+                                return HttpResponse::BadRequest().json(serde_json::json!({
+                                    "success": false,
+                                    "error": format!("Erro ao buscar preço atual de {}: {}. Informe o preço base manualmente.", body.symbol, e),
+                                    "field": "config.base_price"
+                                }));
+                            }
+                        }
+                    }
+                    None => {
+                        return HttpResponse::BadRequest().json(serde_json::json!({
+                            "success": false,
+                            "error": "Exchange não encontrada nas suas configurações. Conecte a exchange primeiro.",
+                            "field": "exchange_id"
+                        }));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("❌ Erro ao acessar credenciais: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "error": "Não foi possível acessar suas credenciais de exchange. Tente novamente."
+                }));
+            }
+        }
+    }
+
     if config.gradual_sell && config.gradual_lots.is_empty() {
         config.gradual_lots = vec![
             GradualLot { lot_number: 1, sell_percent: 25.0, executed: false, executed_at: None, executed_price: None, realized_pnl: None },

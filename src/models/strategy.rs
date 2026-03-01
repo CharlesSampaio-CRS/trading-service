@@ -175,6 +175,9 @@ pub struct StrategyExecution {
     pub executed_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// "system" (monitor automático) ou "user" (tick manual). Preenchido no persist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -209,6 +212,9 @@ pub struct StrategySignal {
     #[serde(default)]
     pub price_change_percent: f64,
     pub created_at: i64,
+    /// "system" (monitor automático) ou "user" (tick manual). Preenchido no persist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

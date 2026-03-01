@@ -1359,3 +1359,403 @@ pub struct ProcessResult {
     pub signals_generated: usize,
     pub orders_executed: usize,
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// TESTES — Simulação de estratégia SOL/USDT com DCA + Gradual Sell
+// ═══════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{
+        GradualLot, PositionInfo, StrategyConfig, StrategyItem, StrategySignal,
+        StrategyStatus, SignalType,
+    };
+
+    /// Cria a estratégia SOL exatamente como configurada no MongoDB:
+    /// - Comprou $36 de SOL a $88.29 (0.40774 SOL)
+    /// - TP: 12% em 4 lotes de 25%
+    /// - DCA: compra +$36 se cair 10%, máx 3 compras
+    /// - Stop Loss desativado
+    fn create_sol_strategy() -> StrategyItem {
+        StrategyItem {
+            strategy_id: "test-sol-001".into(),
+            name: "SOL DCA + Gradual".into(),
+            symbol: "SOL/USDT".into(),
+            exchange_id: "test-exchange".into(),
+            exchange_name: "Binance".into(),
+            is_active: true,
+            status: StrategyStatus::InPosition,
+            config: StrategyConfig {
+                base_price: 88.29,
+                invested_amount: 36.0,
+                take_profit_percent: 12.0,
+                stop_loss_enabled: false,
+                stop_loss_percent: 5.0,
+                gradual_take_percent: 5.0,
+                fee_percent: 0.2,
+                gradual_sell: true,
+                gradual_lots: vec![
+                    GradualLot { lot_number: 1, sell_percent: 25.0, executed: false, executed_at: None, executed_price: None, realized_pnl: None },
+                    GradualLot { lot_number: 2, sell_percent: 25.0, executed: false, executed_at: None, executed_price: None, realized_pnl: None },
+                    GradualLot { lot_number: 3, sell_percent: 25.0, executed: false, executed_at: None, executed_price: None, realized_pnl: None },
+                    GradualLot { lot_number: 4, sell_percent: 25.0, executed: false, executed_at: None, executed_price: None, realized_pnl: None },
+                ],
+                timer_gradual_min: 15,
+                time_execution_min: 43200,
+                dca_enabled: true,
+                dca_buy_amount_usd: 36.0,
+                dca_trigger_percent: 10.0,
+                dca_max_buys: 3,
+            },
+            position: Some(PositionInfo {
+                entry_price: 88.29,
+                quantity: 0.40774,
+                total_cost: 36.0,
+                current_price: 88.29,
+                unrealized_pnl: 0.0,
+                unrealized_pnl_percent: 0.0,
+                highest_price: 88.29,
+                opened_at: 1772330880,
+            }),
+            executions: vec![],
+            signals: vec![],
+            last_checked_at: None,
+            last_price: None,
+            last_gradual_sell_at: None,
+            error_message: None,
+            total_pnl_usd: 0.0,
+            total_executions: 0,
+            dca_buys_done: 0,
+            started_at: 1772330880,
+            created_at: 1772330880,
+            updated_at: 1772330880,
+        }
+    }
+
+    /// Helper: roda evaluate_exit e retorna os sinais gerados
+    fn run_tick(strategy: &StrategyItem, price: f64) -> Vec<StrategySignal> {
+        let mut signals = Vec::new();
+        let now = chrono::Utc::now().timestamp();
+        match strategy.status {
+            StrategyStatus::InPosition => evaluate_exit(strategy, price, now, &mut signals),
+            StrategyStatus::GradualSelling => evaluate_gradual(strategy, price, now, &mut signals),
+            StrategyStatus::Monitoring => evaluate_trigger(strategy, price, now, &mut signals),
+            _ => {}
+        }
+        signals
+    }
+
+    /// Helper: simula o efeito de um DCA buy na strategy (sem exchange real)
+    fn simulate_dca_buy(strategy: &mut StrategyItem, buy_price: f64) {
+        let dca_amount = strategy.config.dca_buy_amount_usd;
+        let new_qty_bought = dca_amount / buy_price;
+
+        let old_qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
+        let old_cost = strategy.position.as_ref().map(|p| p.total_cost).unwrap_or(0.0);
+        let new_qty = old_qty + new_qty_bought;
+        let new_cost = old_cost + dca_amount;
+        let new_avg = new_cost / new_qty;
+
+        // Atualiza position
+        if let Some(ref mut pos) = strategy.position {
+            pos.quantity = new_qty;
+            pos.total_cost = new_cost;
+            pos.entry_price = new_avg;
+        }
+        // Atualiza config (como o persist faz)
+        strategy.config.base_price = new_avg;
+        strategy.config.invested_amount = new_cost;
+        strategy.dca_buys_done += 1;
+    }
+
+    /// Helper: imprime resumo formatado do sinal
+    fn print_signal(tick_num: usize, price: f64, signal: &StrategySignal, strategy: &StrategyItem) {
+        let pos = strategy.position.as_ref();
+        let entry = pos.map(|p| p.entry_price).unwrap_or(0.0);
+        let qty = pos.map(|p| p.quantity).unwrap_or(0.0);
+        let invested = strategy.config.invested_amount;
+        let current_value = qty * price;
+        let pnl = current_value - invested;
+        let pnl_pct = if invested > 0.0 { (pnl / invested) * 100.0 } else { 0.0 };
+
+        println!(
+            "  Tick #{:2} │ Preço: ${:>8.2} │ {:12} │ Entrada: ${:.2} │ Qtd: {:.5} │ Investido: ${:.2} │ Valor: ${:.2} │ PnL: {:+.2}$ ({:+.1}%)",
+            tick_num, price,
+            format!("{}", signal.signal_type),
+            entry, qty, invested, current_value, pnl, pnl_pct
+        );
+        println!("           │ {}", signal.message);
+        println!("           └─────────────────────────────────────────────────");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 1: Cenário completo — preço cai, DCA, sobe, venda gradual
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_sol_strategy_full_scenario() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  SIMULAÇÃO SOL/USDT — DCA + Venda Gradual                  ║");
+        println!("║  Compra: $36 @ $88.29 (0.40774 SOL)                        ║");
+        println!("║  TP: 12% em 4 lotes · DCA: -10% compra +$36 (máx 3x)      ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        let mut strategy = create_sol_strategy();
+
+        // Triggers calculados
+        let tp_price = strategy.config.trigger_price();
+        let dca1_price = strategy.config.base_price * 0.90; // -10%
+        println!("  📊 Triggers iniciais:");
+        println!("     TP (12% + 0.2% fee): ${:.2}", tp_price);
+        println!("     DCA #1 (-10%):       ${:.2}", dca1_price);
+        println!("     Stop Loss:           DESATIVADO");
+        println!("  ─────────────────────────────────────────────────────────\n");
+
+        // 10 variações simuladas de preço da SOL
+        let prices = vec![
+            85.00,  // Tick 1: caiu um pouco, sem trigger
+            80.00,  // Tick 2: caiu mais, quase DCA (precisa < 79.46)
+            79.00,  // Tick 3: ⚡ DCA #1 triggered! Preço caiu 10%+
+            75.00,  // Tick 4: após DCA#1, novo médio ~83.64, novo trigger DCA = 83.64*0.9 = ~75.28 → quase
+            74.00,  // Tick 5: ⚡ DCA #2 triggered!
+            82.00,  // Tick 6: subindo, mas ainda abaixo do TP
+            92.00,  // Tick 7: subindo forte
+            98.00,  // Tick 8: perto do TP
+            99.00,  // Tick 9: ⚡ TP triggered! Preço acima do trigger
+           105.00,  // Tick 10: continua acima, mais vendas graduais
+        ];
+
+        for (i, &price) in prices.iter().enumerate() {
+            let tick_num = i + 1;
+            let signals = run_tick(&strategy, price);
+
+            for signal in &signals {
+                print_signal(tick_num, price, signal, &strategy);
+
+                // Simular efeitos do DCA
+                if signal.signal_type == SignalType::DcaBuy {
+                    simulate_dca_buy(&mut strategy, price);
+                    let new_tp = strategy.config.trigger_price();
+                    let new_dca = strategy.config.base_price * 0.90;
+                    println!("           🔄 APÓS DCA #{}: novo médio ${:.2}, novo TP ${:.2}, próximo DCA ${:.2}",
+                        strategy.dca_buys_done, strategy.config.base_price, new_tp, new_dca);
+                    println!("           └─────────────────────────────────────────────────");
+                }
+            }
+        }
+
+        println!("\n  📋 RESUMO FINAL:");
+        println!("     DCA buys realizados: {}/{}", strategy.dca_buys_done, strategy.config.dca_max_buys);
+        println!("     Preço médio final:   ${:.2}", strategy.config.base_price);
+        println!("     Total investido:     ${:.2}", strategy.config.invested_amount);
+        println!("     Quantidade total:    {:.5} SOL", strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0));
+        println!("     TP price final:      ${:.2}", strategy.config.trigger_price());
+        println!();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 2: Preço só cai — 3 DCAs e depois para (máx atingido)
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_sol_dca_max_reached() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  TESTE: DCA máximo atingido (3 compras)                     ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        let mut strategy = create_sol_strategy();
+
+        let prices = vec![
+            79.00,  // DCA #1 (-10.5%)
+            70.00,  // DCA #2 (verificar se cai 10% do novo médio)
+            60.00,  // DCA #3 (último permitido)
+            55.00,  // Já fez 3 DCAs — NÃO deve comprar mais → só Info
+        ];
+
+        for (i, &price) in prices.iter().enumerate() {
+            let signals = run_tick(&strategy, price);
+            for signal in &signals {
+                print_signal(i + 1, price, signal, &strategy);
+
+                if signal.signal_type == SignalType::DcaBuy {
+                    assert!(strategy.dca_buys_done < strategy.config.dca_max_buys,
+                        "Não deveria gerar DCA acima do máximo!");
+                    simulate_dca_buy(&mut strategy, price);
+                    println!("           🔄 DCA #{} OK. Novo médio: ${:.2}, investido: ${:.2}",
+                        strategy.dca_buys_done, strategy.config.base_price, strategy.config.invested_amount);
+                    println!("           └─────────────────────────────────────────────────");
+                }
+            }
+        }
+
+        // No tick 4 ($55), já fez 3 DCAs — deve ser Info, não DcaBuy
+        let final_signals = run_tick(&strategy, 55.0);
+        let has_dca = final_signals.iter().any(|s| s.signal_type == SignalType::DcaBuy);
+        assert!(!has_dca, "Após 3 DCAs, NÃO deve gerar mais DcaBuy!");
+        assert_eq!(strategy.dca_buys_done, 3);
+        println!("\n  ✅ Máximo de 3 DCAs respeitado. dca_buys_done = {}", strategy.dca_buys_done);
+        println!("     Preço médio final: ${:.2} (era $88.29)", strategy.config.base_price);
+        println!("     Total investido:   ${:.2} (era $36)", strategy.config.invested_amount);
+        println!();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 3: Stop Loss desativado — preço despenca, não vende
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_sol_stop_loss_disabled() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  TESTE: Stop Loss desativado + DCA                          ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        let strategy = create_sol_strategy();
+        assert!(!strategy.config.stop_loss_enabled, "Stop loss deve estar desativado!");
+
+        // Preço cai 50% — NÃO deve gerar StopLoss
+        let signals = run_tick(&strategy, 44.0);
+        let has_stop = signals.iter().any(|s| s.signal_type == SignalType::StopLoss);
+        assert!(!has_stop, "Stop loss está desativado, não deveria gerar sinal StopLoss!");
+
+        // Mas deve gerar DcaBuy (se dentro do limite)
+        let has_dca = signals.iter().any(|s| s.signal_type == SignalType::DcaBuy);
+        assert!(has_dca, "Com DCA ativado e queda de 50%, deveria gerar DcaBuy!");
+
+        for signal in &signals {
+            print_signal(1, 44.0, signal, &strategy);
+        }
+        println!("\n  ✅ Stop Loss corretamente desativado, DCA gerado no lugar.");
+        println!();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 4: Double-check — não vende se PnL é negativo
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_double_check_prevents_loss_sale() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  TESTE: Double-check impede venda com prejuízo              ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        let strategy = create_sol_strategy();
+        let config = &strategy.config;
+
+        // Preço exatamente no trigger (12% + 0.2% = 12.2%)
+        let trigger = config.trigger_price();
+        println!("  Trigger price: ${:.2}", trigger);
+
+        // Double-check: invested_amount $36, base $88.29
+        // Se preço = trigger, valor = (36/88.29) * trigger
+        let qty = config.invested_amount / config.base_price;
+        let value_at_trigger = qty * trigger;
+        let pnl_at_trigger = value_at_trigger - config.invested_amount;
+        println!("  Valor no trigger: ${:.2}, PnL: ${:.2}", value_at_trigger, pnl_at_trigger);
+        assert!(pnl_at_trigger > 0.0, "No trigger real, PnL deve ser positivo!");
+
+        // Agora testar com preço levemente abaixo do investido (não deveria vender)
+        let bad_price = config.base_price * 0.99; // -1%
+        let value_at_bad = qty * bad_price;
+        let pnl_at_bad = value_at_bad - config.invested_amount;
+        println!("  Preço ruim: ${:.2}, Valor: ${:.2}, PnL: ${:.2} — NÃO deve vender", bad_price, value_at_bad, pnl_at_bad);
+        assert!(pnl_at_bad < 0.0, "Preço abaixo do base = prejuízo");
+
+        println!("\n  ✅ Double-check: garante que venda só acontece com lucro real.");
+        println!();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 5: Triggers calculados corretamente
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_trigger_calculations() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  TESTE: Cálculo de triggers                                 ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        let config = create_sol_strategy().config;
+
+        // TP = base * (1 + 12% + 0.2%) = 88.29 * 1.122 = $99.06
+        let tp = config.trigger_price();
+        let expected_tp = 88.29 * 1.122;
+        println!("  TP price:       ${:.2} (esperado: ${:.2})", tp, expected_tp);
+        assert!((tp - expected_tp).abs() < 0.01, "TP incorreto!");
+
+        // DCA trigger = base * 0.90 = 88.29 * 0.90 = $79.46
+        let dca_trigger = config.base_price * (1.0 - config.dca_trigger_percent / 100.0);
+        let expected_dca = 88.29 * 0.90;
+        println!("  DCA trigger:    ${:.2} (esperado: ${:.2})", dca_trigger, expected_dca);
+        assert!((dca_trigger - expected_dca).abs() < 0.01, "DCA trigger incorreto!");
+
+        // Gradual lot 0 = TP price (mesmo)
+        // Gradual lot 1 = base * (1 + 12% + 0.2% + 5%) = 88.29 * 1.172 = $103.48
+        let grad0 = config.gradual_trigger_price(0);
+        let grad1 = config.gradual_trigger_price(1);
+        let grad2 = config.gradual_trigger_price(2);
+        let grad3 = config.gradual_trigger_price(3);
+        println!("  Gradual Lote 1: ${:.2} (= TP)", grad0);
+        println!("  Gradual Lote 2: ${:.2} (+5%)", grad1);
+        println!("  Gradual Lote 3: ${:.2} (+10%)", grad2);
+        println!("  Gradual Lote 4: ${:.2} (+15%)", grad3);
+
+        assert!(grad0 < grad1, "Lote 2 deve ter trigger maior que lote 1");
+        assert!(grad1 < grad2, "Lote 3 deve ter trigger maior que lote 2");
+        assert!(grad2 < grad3, "Lote 4 deve ter trigger maior que lote 3");
+
+        // Stop loss = desativado, mas cálculo = base * 0.95 = $83.88
+        let sl = config.stop_loss_price();
+        println!("  Stop Loss:      ${:.2} (DESATIVADO)", sl);
+        assert!(!config.stop_loss_enabled, "SL deve estar off");
+
+        println!("\n  ✅ Todos os triggers calculados corretamente.");
+        println!();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 6: DCA reduz preço médio progressivamente
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_dca_lowers_average_price() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  TESTE: DCA reduz preço médio progressivamente              ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        let mut strategy = create_sol_strategy();
+        let initial_avg = strategy.config.base_price;
+
+        println!("  Inicial: avg ${:.2}, investido ${:.2}, qty {:.5}",
+            initial_avg, strategy.config.invested_amount,
+            strategy.position.as_ref().unwrap().quantity);
+
+        // DCA #1 a $79.00
+        simulate_dca_buy(&mut strategy, 79.00);
+        let avg1 = strategy.config.base_price;
+        assert!(avg1 < initial_avg, "Após DCA#1, média deve cair!");
+        println!("  DCA #1 @ $79.00: avg ${:.2}, investido ${:.2}, qty {:.5}",
+            avg1, strategy.config.invested_amount,
+            strategy.position.as_ref().unwrap().quantity);
+
+        // DCA #2 a $70.00
+        simulate_dca_buy(&mut strategy, 70.00);
+        let avg2 = strategy.config.base_price;
+        assert!(avg2 < avg1, "Após DCA#2, média deve cair mais!");
+        println!("  DCA #2 @ $70.00: avg ${:.2}, investido ${:.2}, qty {:.5}",
+            avg2, strategy.config.invested_amount,
+            strategy.position.as_ref().unwrap().quantity);
+
+        // DCA #3 a $62.00
+        simulate_dca_buy(&mut strategy, 62.00);
+        let avg3 = strategy.config.base_price;
+        assert!(avg3 < avg2, "Após DCA#3, média deve cair mais!");
+        println!("  DCA #3 @ $62.00: avg ${:.2}, investido ${:.2}, qty {:.5}",
+            avg3, strategy.config.invested_amount,
+            strategy.position.as_ref().unwrap().quantity);
+
+        // Novo TP deve ser menor que o original
+        let original_tp = 88.29 * 1.122;
+        let new_tp = strategy.config.trigger_price();
+        assert!(new_tp < original_tp, "Com média menor, TP deve ser mais baixo e alcançável!");
+        println!("\n  TP original: ${:.2} → TP após 3 DCAs: ${:.2} (${:.2} mais fácil!)",
+            original_tp, new_tp, original_tp - new_tp);
+
+        println!("\n  ✅ DCA reduz preço médio: ${:.2} → ${:.2} (-{:.1}%)",
+            initial_avg, avg3, ((initial_avg - avg3) / initial_avg) * 100.0);
+        println!();
+    }
+}

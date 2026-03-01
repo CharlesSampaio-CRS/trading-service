@@ -4,6 +4,7 @@ use crate::database::MongoDB;
 use crate::models::{
     UserStrategies, StrategyItem, CreateStrategyRequest, UpdateStrategyRequest,
     StrategyResponse, StrategyListItem, StrategyStatus, GradualLot, StrategySignal,
+    PositionInfo,
 };
 use crate::middleware::auth::Claims;
 use crate::services::{strategy_service, user_exchanges_service};
@@ -263,11 +264,37 @@ pub async fn create_strategy(user: web::ReqData<Claims>, body: web::Json<CreateS
             GradualLot { lot_number: 4, sell_percent: 25.0, executed: false, executed_at: None, executed_price: None, realized_pnl: None },
         ];
     }
+
+    // ── Auto-position: se invested_amount > 0, o usuário já comprou ─
+    let (initial_status, initial_position) = if config.invested_amount > 0.0 && config.base_price > 0.0 {
+        let qty = config.invested_amount / config.base_price;
+        log::info!(
+            "💰 invested_amount={:.2} + base_price={:.2} → criando position automática: {:.6} unidades de {}",
+            config.invested_amount, config.base_price, qty, body.symbol
+        );
+        (
+            StrategyStatus::InPosition,
+            Some(PositionInfo {
+                entry_price: config.base_price,
+                quantity: qty,
+                total_cost: config.invested_amount,
+                current_price: config.base_price,
+                unrealized_pnl: 0.0,
+                unrealized_pnl_percent: 0.0,
+                highest_price: config.base_price,
+                opened_at: now,
+            }),
+        )
+    } else {
+        log::info!("📊 Sem invested_amount — estratégia inicia em Monitoring sem position");
+        (StrategyStatus::Monitoring, None)
+    };
+
     let new_strategy = StrategyItem {
         strategy_id: strategy_id.clone(), name: body.name.clone(), symbol: body.symbol.clone(),
         exchange_id: body.exchange_id.clone(), exchange_name: body.exchange_name.clone(),
-        is_active: true, status: StrategyStatus::Monitoring, config,
-        position: None, executions: vec![], signals: vec![],
+        is_active: true, status: initial_status, config,
+        position: initial_position, executions: vec![], signals: vec![],
         last_checked_at: None, last_price: None, last_gradual_sell_at: None,
         error_message: None, total_pnl_usd: 0.0, total_executions: 0,
         started_at: now, created_at: now, updated_at: now,

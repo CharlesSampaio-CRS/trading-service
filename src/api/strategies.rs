@@ -297,6 +297,7 @@ pub async fn create_strategy(user: web::ReqData<Claims>, body: web::Json<CreateS
         position: initial_position, executions: vec![], signals: vec![],
         last_checked_at: None, last_price: None, last_gradual_sell_at: None,
         error_message: None, total_pnl_usd: 0.0, total_executions: 0,
+        dca_buys_done: 0,
         started_at: now, created_at: now, updated_at: now,
     };
     let bson = match mongodb::bson::to_bson(&new_strategy) {

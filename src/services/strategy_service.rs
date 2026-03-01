@@ -119,7 +119,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     "Strategy '{}' expired. Ran for {} minutes (limit: {} min). No position was opened.",
                     strategy.name, elapsed_min, strategy.config.time_execution_min
                 ),
-                acted: false, price_change_percent: 0.0, created_at: now,
+                acted: false, price_change_percent: 0.0, created_at: now, source: None,
             }],
             executions: vec![], new_status: Some(StrategyStatus::Expired), error: None,
         };
@@ -270,7 +270,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                             total: order.cost.unwrap_or(sell_price * filled),
                             fee, pnl_usd: pnl - fee,
                             exchange_order_id: Some(order.order_id),
-                            executed_at: now, error_message: None,
+                            executed_at: now, error_message: None, source: None,
                         });
 
                         if !strategy.config.gradual_sell {
@@ -294,7 +294,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                             reason: format!("sell_failed: {}", friendly),
                             price, amount: sell_amount, total: sell_amount * price,
                             fee: 0.0, pnl_usd: 0.0, exchange_order_id: None,
-                            executed_at: now, error_message: Some(friendly),
+                            executed_at: now, error_message: Some(friendly), source: None,
                         });
                     }
                 }
@@ -319,7 +319,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                             total: order.cost.unwrap_or(sell_price * filled),
                             fee, pnl_usd: pnl - fee,
                             exchange_order_id: Some(order.order_id),
-                            executed_at: now, error_message: None,
+                            executed_at: now, error_message: None, source: None,
                         });
                         new_status = Some(StrategyStatus::StoppedOut);
                     }
@@ -333,7 +333,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                             reason: format!("stop_loss_failed: {}", friendly),
                             price, amount: qty, total: qty * price,
                             fee: 0.0, pnl_usd: 0.0, exchange_order_id: None,
-                            executed_at: now, error_message: Some(friendly),
+                            executed_at: now, error_message: Some(friendly), source: None,
                         });
                     }
                 }
@@ -374,7 +374,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                             "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%).{} Iniciando venda gradual — lote {} de {:.0}%.",
                             price, trigger, pct, pnl_info, lot.lot_number, lot.sell_percent
                         ),
-                        acted: false, price_change_percent: pct, created_at: now,
+                        acted: false, price_change_percent: pct, created_at: now, source: None,
                     });
                 }
             } else {
@@ -384,7 +384,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                         "🎯 TRIGGER ATINGIDO! Preço {:.2} >= trigger {:.2} ({:+.2}%).{} Executando venda total.",
                         price, trigger, pct, pnl_info
                     ),
-                    acted: false, price_change_percent: pct, created_at: now,
+                    acted: false, price_change_percent: pct, created_at: now, source: None,
                 });
             }
         } else if config.stop_loss_enabled && price <= sl_price {
@@ -394,7 +394,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                     "🛑 STOP LOSS ATINGIDO! Preço {:.2} <= stop {:.2} ({:+.2}%).{} Vendendo tudo para limitar perda.",
                     price, sl_price, pct, pnl_info
                 ),
-                acted: false, price_change_percent: pct, created_at: now,
+                acted: false, price_change_percent: pct, created_at: now, source: None,
             });
         } else {
             let diff_trigger = trigger - price;
@@ -413,7 +413,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                     },
                     pnl_info
                 ),
-                acted: false, price_change_percent: pct, created_at: now,
+                acted: false, price_change_percent: pct, created_at: now, source: None,
             });
         }
     } else {
@@ -430,7 +430,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                 "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%).{}{} Aguardando entrada manual ou via exchange.",
                 price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_info, pnl_info
             ),
-            acted: false, price_change_percent: pct, created_at: now,
+            acted: false, price_change_percent: pct, created_at: now, source: None,
         });
     }
 }
@@ -443,7 +443,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
             signals.push(StrategySignal {
                 signal_type: SignalType::Info, price,
                 message: "⚠️ Status 'in_position' mas sem quantidade aberta. Verifique o estado da estratégia.".into(),
-                acted: false, price_change_percent: 0.0, created_at: now,
+                acted: false, price_change_percent: 0.0, created_at: now, source: None,
             });
             return;
         }
@@ -454,7 +454,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
             message: "⚠️ Preço de entrada é 0. Não é possível calcular PnL. Verifique a posição.".into(),
-            acted: false, price_change_percent: 0.0, created_at: now,
+            acted: false, price_change_percent: 0.0, created_at: now, source: None,
         });
         return;
     }
@@ -473,7 +473,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
                         "🎯 TAKE PROFIT! Preço {:.2} >= trigger {:.2} ({:+.2}%). PnL não realizado: ${:.2}. Iniciando venda gradual — lote {} ({:.0}%).",
                         price, trigger, pct, unrealized_pnl, lot.lot_number, lot.sell_percent
                     ),
-                    acted: false, price_change_percent: pct, created_at: now,
+                    acted: false, price_change_percent: pct, created_at: now, source: None,
                 });
             } else {
                 signals.push(StrategySignal {
@@ -482,7 +482,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
                         "🎯 Todos os lotes graduais executados. Vendendo posição restante ({:.6} unidades).",
                         position.quantity
                     ),
-                    acted: false, price_change_percent: pct, created_at: now,
+                    acted: false, price_change_percent: pct, created_at: now, source: None,
                 });
             }
         } else {
@@ -492,7 +492,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
                     "🎯 TAKE PROFIT! Preço {:.2} >= trigger {:.2} ({:+.2}%). PnL não realizado: ${:.2}. Vendendo tudo.",
                     price, trigger, pct, unrealized_pnl
                 ),
-                acted: false, price_change_percent: pct, created_at: now,
+                acted: false, price_change_percent: pct, created_at: now, source: None,
             });
         }
     } else if config.stop_loss_enabled && price <= sl_price {
@@ -502,7 +502,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
                 "🛑 STOP LOSS! Preço {:.2} <= stop {:.2} ({:+.2}%). Perda estimada: ${:.2}. Vendendo tudo para limitar perda.",
                 price, sl_price, pct, unrealized_pnl
             ),
-            acted: false, price_change_percent: pct, created_at: now,
+            acted: false, price_change_percent: pct, created_at: now, source: None,
         });
     } else {
         let diff_trigger = trigger - price;
@@ -525,7 +525,7 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
                 sl_msg,
                 highest, drawdown
             ),
-            acted: false, price_change_percent: pct, created_at: now,
+            acted: false, price_change_percent: pct, created_at: now, source: None,
         });
     }
 }
@@ -538,7 +538,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             signals.push(StrategySignal {
                 signal_type: SignalType::Info, price,
                 message: "⚠️ Status 'gradual_selling' mas sem posição aberta. Todos os lotes podem já ter sido vendidos.".into(),
-                acted: false, price_change_percent: 0.0, created_at: now,
+                acted: false, price_change_percent: 0.0, created_at: now, source: None,
             });
             return;
         }
@@ -549,7 +549,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
         signals.push(StrategySignal {
             signal_type: SignalType::Info, price,
             message: "⚠️ Preço de entrada é 0 durante venda gradual. Verifique a posição.".into(),
-            acted: false, price_change_percent: 0.0, created_at: now,
+            acted: false, price_change_percent: 0.0, created_at: now, source: None,
         });
         return;
     }
@@ -566,7 +566,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                 "🛑 STOP LOSS durante venda gradual! Preço {:.2} <= stop {:.2} ({:+.2}%). {}/{} lotes vendidos. Vendendo posição restante ({:.6}) para limitar perda.",
                 price, sl_price, pct, executed_lots, total_lots, position.quantity
             ),
-            acted: false, price_change_percent: pct, created_at: now,
+            acted: false, price_change_percent: pct, created_at: now, source: None,
         });
         return;
     }
@@ -583,7 +583,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                 "⏱️ Timer gradual ativo: próximo lote em {}min {}s. Preço {:.2} ({:+.2}%). PnL: ${:.2}. Progresso: {}/{} lotes vendidos.",
                 remaining_min, remaining_sec, price, pct, unrealized_pnl, executed_lots, total_lots
             ),
-            acted: false, price_change_percent: pct, created_at: now,
+            acted: false, price_change_percent: pct, created_at: now, source: None,
         });
         return;
     }
@@ -601,7 +601,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                         "📈 VENDA GRADUAL! Lote {} de {}: preço {:.2} >= trigger gradual {:.2}. Vendendo {:.0}% ({:.6} unidades). Progresso: {}/{} lotes.",
                         lot.lot_number, total_lots, price, gradual_trigger, lot.sell_percent, sell_qty, executed_lots, total_lots
                     ),
-                    acted: false, price_change_percent: pct, created_at: now,
+                    acted: false, price_change_percent: pct, created_at: now, source: None,
                 });
             } else {
                 let diff = gradual_trigger - price;
@@ -612,7 +612,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                         "⏳ Aguardando lote {} de {}: preço {:.2} < trigger gradual {:.2}. Faltam {:.2} ({:.2}%) para acionar. PnL: ${:.2}. Timer: pronto. Progresso: {}/{} lotes.",
                         lot.lot_number, total_lots, price, gradual_trigger, diff, diff_pct, unrealized_pnl, executed_lots, total_lots
                     ),
-                    acted: false, price_change_percent: pct, created_at: now,
+                    acted: false, price_change_percent: pct, created_at: now, source: None,
                 });
             }
         }
@@ -623,7 +623,7 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
                     "✅ Todos os {} lotes graduais executados! Vendendo posição restante ({:.6} unidades) a {:.2}.",
                     total_lots, position.quantity, price
                 ),
-                acted: false, price_change_percent: pct, created_at: now,
+                acted: false, price_change_percent: pct, created_at: now, source: None,
             });
         }
     }
@@ -906,12 +906,21 @@ pub async fn persist_tick_result(
     // to avoid inflating MongoDB with "monitoring..." info logs every 30s.
     // When manual (user clicked Tick), save ALL signals including Info.
     if !result.signals.is_empty() {
-        let signals_to_save: Vec<&StrategySignal> = if manual {
-            result.signals.iter().collect()
+        let source = if manual { "user" } else { "system" };
+        let signals_to_save: Vec<StrategySignal> = if manual {
+            result.signals.iter().map(|s| {
+                let mut sig = s.clone();
+                sig.source = Some(source.to_string());
+                sig
+            }).collect()
         } else {
             result.signals.iter()
                 .filter(|s| !matches!(s.signal_type, SignalType::Info))
-                .collect()
+                .map(|s| {
+                    let mut sig = s.clone();
+                    sig.source = Some(source.to_string());
+                    sig
+                }).collect()
         };
         let signals_bson: Vec<mongodb::bson::Bson> = signals_to_save.iter()
             .filter_map(|s| mongodb::bson::to_bson(s).ok()).collect();
@@ -924,7 +933,13 @@ pub async fn persist_tick_result(
     }
 
     if !result.executions.is_empty() {
-        let execs_bson: Vec<mongodb::bson::Bson> = result.executions.iter()
+        let source = if manual { "user" } else { "system" };
+        let execs_with_source: Vec<StrategyExecution> = result.executions.iter().map(|e| {
+            let mut exec = e.clone();
+            exec.source = Some(source.to_string());
+            exec
+        }).collect();
+        let execs_bson: Vec<mongodb::bson::Bson> = execs_with_source.iter()
             .filter_map(|e| mongodb::bson::to_bson(e).ok()).collect();
         if !execs_bson.is_empty() {
             let _ = collection.update_one(

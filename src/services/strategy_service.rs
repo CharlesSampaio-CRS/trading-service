@@ -2,7 +2,7 @@ use crate::{
     ccxt::CCXTClient,
     database::MongoDB,
     models::{
-        DecryptedExchange, ExecutionAction, PositionInfo, StrategyItem,
+        Balance, DecryptedExchange, ExecutionAction, PositionInfo, StrategyItem,
         StrategyExecution, StrategySignal, StrategyStatus, SignalType,
         UserStrategies,
     },
@@ -10,6 +10,7 @@ use crate::{
     utils::thread_pool::spawn_ccxt_blocking,
 };
 use mongodb::bson::doc;
+use std::collections::HashMap;
 
 const COLLECTION: &str = "user_strategy";
 
@@ -39,6 +40,21 @@ pub async fn fetch_current_price(
         let ticker = client.fetch_ticker_sync(&symbol)?;
         ticker.get("last").and_then(|v| v.as_f64())
             .ok_or_else(|| format!("No 'last' price for {}", symbol))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Buscar saldo disponível (free) de todos os ativos na exchange.
+async fn fetch_balance(exchange: &DecryptedExchange) -> Result<HashMap<String, Balance>, String> {
+    let ccxt_id = exchange.ccxt_id.clone();
+    let api_key = exchange.api_key.clone();
+    let api_secret = exchange.api_secret.clone();
+    let passphrase = exchange.passphrase.clone();
+
+    spawn_ccxt_blocking(move || {
+        let client = CCXTClient::new(&ccxt_id, &api_key, &api_secret, passphrase.as_deref())?;
+        client.fetch_balance_sync()
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -214,6 +230,29 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
         _ => {}
     }
 
+    // ── Verificar saldo da exchange se houver sinais de ação ──────
+    let has_actionable = signals.iter().any(|s| matches!(
+        s.signal_type,
+        SignalType::TakeProfit | SignalType::GradualSell | SignalType::StopLoss | SignalType::DcaBuy
+    ));
+    let balances = if has_actionable {
+        match fetch_balance(exchange).await {
+            Ok(b) => Some(b),
+            Err(e) => {
+                log::warn!("⚠️ [{}] Não conseguiu buscar saldo: {}. Prosseguindo sem validação.", strategy.strategy_id, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Extrair token base e quote do symbol (ex: "SOL/USDT" → "SOL", "USDT")
+    let (base_asset, quote_asset) = {
+        let parts: Vec<&str> = strategy.symbol.split('/').collect();
+        (parts.get(0).unwrap_or(&"").to_string(), parts.get(1).unwrap_or(&"USDT").to_string())
+    };
+
     for signal in &mut signals {
         match signal.signal_type {
             SignalType::TakeProfit | SignalType::GradualSell => {
@@ -247,6 +286,24 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                         "✅ [{}] DOUBLE-CHECK OK: Investido ${:.2} → atual ${:.2} (lucro: +${:.2}). Prosseguindo com venda.",
                         strategy.strategy_id, config.invested_amount, current_value, estimated_pnl
                     );
+                }
+
+                // ── Balance check: verificar se tem saldo suficiente do token para vender ──
+                if let Some(ref bals) = balances {
+                    let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                    if token_free < sell_amount * 0.95 { // 5% margem para arredondamento
+                        log::warn!(
+                            "⚠️ [{}] SALDO INSUFICIENTE para vender {:.6} {}! Saldo livre: {:.6}. Venda BLOQUEADA.",
+                            strategy.strategy_id, sell_amount, base_asset, token_free
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas só tem {:.6} disponível na exchange. Verifique seu saldo.",
+                            sell_amount, base_asset, token_free
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
                 }
 
                 match execute_order(exchange, &strategy.symbol, "market", "sell", sell_amount, None).await {
@@ -300,38 +357,151 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 }
             }
             SignalType::StopLoss => {
-                let qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
-                if qty <= 0.0 { continue; }
-                match execute_order(exchange, &strategy.symbol, "market", "sell", qty, None).await {
+                // Se DCA está ativado, NÃO vende — transforma em DcaBuy
+                if strategy.config.dca_enabled
+                    && strategy.config.dca_buy_amount_usd > 0.0
+                    && strategy.dca_buys_done < strategy.config.dca_max_buys
+                {
+                    signal.signal_type = SignalType::DcaBuy;
+                    signal.acted = false;
+                    signal.message = format!(
+                        "📉 DCA ativado! Preço {:.2} caiu abaixo do stop. Convertendo em compra DCA #{} de ${:.2} (máx: {}).",
+                        price, strategy.dca_buys_done + 1, strategy.config.dca_buy_amount_usd, strategy.config.dca_max_buys
+                    );
+                    // Será tratado no bloco DcaBuy abaixo
+                } else {
+                    let qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
+                    if qty <= 0.0 { continue; }
+
+                    // ── Balance check: verificar saldo do token para stop loss ──
+                    if let Some(ref bals) = balances {
+                        let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                        if token_free < qty * 0.95 {
+                            log::warn!(
+                                "⚠️ [{}] SALDO INSUFICIENTE para stop loss! Precisa: {:.6} {}, Disponível: {:.6}.",
+                                strategy.strategy_id, qty, base_asset, token_free
+                            );
+                            signal.acted = false;
+                            signal.message = format!(
+                                "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas só tem {:.6}. Verifique seu saldo na exchange.",
+                                qty, base_asset, token_free
+                            );
+                            signal.signal_type = SignalType::Info;
+                            continue;
+                        }
+                    }
+
+                    match execute_order(exchange, &strategy.symbol, "market", "sell", qty, None).await {
+                        Ok(order) => {
+                            signal.acted = true;
+                            let entry = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
+                            let filled = order.filled.unwrap_or(qty);
+                            let sell_price = order.avg_price.unwrap_or(price);
+                            let pnl = (sell_price - entry) * filled;
+                            let fee = order.fee.unwrap_or(0.0);
+                            log::warn!("🛑 [{}] STOP LOSS executed: {:.6} {} @ {:.4} | Loss: ${:.2}",
+                                strategy.strategy_id, filled, strategy.symbol, sell_price, pnl - fee);
+                            executions.push(StrategyExecution {
+                                execution_id: uuid::Uuid::new_v4().to_string(),
+                                action: ExecutionAction::Sell, reason: "stop_loss".into(),
+                                price: sell_price, amount: filled,
+                                total: order.cost.unwrap_or(sell_price * filled),
+                                fee, pnl_usd: pnl - fee,
+                                exchange_order_id: Some(order.order_id),
+                                executed_at: now, error_message: None, source: None,
+                            });
+                            new_status = Some(StrategyStatus::StoppedOut);
+                        }
+                        Err(e) => {
+                            signal.acted = false;
+                            let friendly = classify_order_error(&e, &strategy.symbol, &strategy.exchange_name);
+                            log::error!("❌ [{}] Stop loss SELL FAILED: {} | raw: {}", strategy.strategy_id, friendly, e);
+                            executions.push(StrategyExecution {
+                                execution_id: uuid::Uuid::new_v4().to_string(),
+                                action: ExecutionAction::SellFailed,
+                                reason: format!("stop_loss_failed: {}", friendly),
+                                price, amount: qty, total: qty * price,
+                                fee: 0.0, pnl_usd: 0.0, exchange_order_id: None,
+                                executed_at: now, error_message: Some(friendly), source: None,
+                            });
+                        }
+                    }
+                }
+            }
+            SignalType::DcaBuy => {
+                // ── DCA: comprar mais para baixar preço médio ──
+                let dca_amount = strategy.config.dca_buy_amount_usd;
+                if dca_amount <= 0.0 { continue; }
+
+                // ── Balance check: verificar se tem USDT suficiente para comprar ──
+                if let Some(ref bals) = balances {
+                    let quote_free = bals.get(&quote_asset).map(|b| b.free).unwrap_or(0.0);
+                    if quote_free < dca_amount * 0.95 { // 5% margem
+                        log::warn!(
+                            "⚠️ [{}] SALDO {} INSUFICIENTE para DCA! Precisa: ${:.2}, Disponível: ${:.2}. Compra BLOQUEADA.",
+                            strategy.strategy_id, quote_asset, dca_amount, quote_free
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ Saldo insuficiente para DCA! Precisa de ${:.2} {} mas só tem ${:.2} disponível. Deposite mais {} ou reduza o valor DCA.",
+                            dca_amount, quote_asset, quote_free, quote_asset
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
+                }
+
+                let buy_qty = dca_amount / price;
+                log::info!(
+                    "📉 [{}] DCA BUY #{}: comprando ${:.2} = {:.6} {} @ {:.2}",
+                    strategy.strategy_id, strategy.dca_buys_done + 1, dca_amount, buy_qty, strategy.symbol, price
+                );
+                match execute_order(exchange, &strategy.symbol, "market", "buy", buy_qty, None).await {
                     Ok(order) => {
                         signal.acted = true;
-                        let entry = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
-                        let filled = order.filled.unwrap_or(qty);
-                        let sell_price = order.avg_price.unwrap_or(price);
-                        let pnl = (sell_price - entry) * filled;
+                        let filled = order.filled.unwrap_or(buy_qty);
+                        let buy_price = order.avg_price.unwrap_or(price);
+                        let cost = order.cost.unwrap_or(buy_price * filled);
                         let fee = order.fee.unwrap_or(0.0);
-                        log::warn!("🛑 [{}] STOP LOSS executed: {:.6} {} @ {:.4} | Loss: ${:.2}",
-                            strategy.strategy_id, filled, strategy.symbol, sell_price, pnl - fee);
+                        // Calcular novo preço médio
+                        let old_qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
+                        let old_cost = strategy.position.as_ref().map(|p| p.total_cost).unwrap_or(0.0);
+                        let new_qty = old_qty + filled;
+                        let new_cost = old_cost + cost;
+                        let new_avg = if new_qty > 0.0 { new_cost / new_qty } else { buy_price };
+                        log::info!(
+                            "✅ [{}] DCA BUY #{} OK: +{:.6} @ {:.2}. Novo médio: {:.2} (era {:.2}). Total: {:.6} unidades, ${:.2} investido.",
+                            strategy.strategy_id, strategy.dca_buys_done + 1, filled, buy_price, new_avg,
+                            strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0),
+                            new_qty, new_cost
+                        );
+                        signal.message = format!(
+                            "📉 DCA BUY #{} executado! Comprou {:.6} {} @ {:.2} (${:.2}). Novo preço médio: {:.2}. Total investido: ${:.2}.",
+                            strategy.dca_buys_done + 1, filled, strategy.symbol, buy_price, cost, new_avg, new_cost
+                        );
                         executions.push(StrategyExecution {
                             execution_id: uuid::Uuid::new_v4().to_string(),
-                            action: ExecutionAction::Sell, reason: "stop_loss".into(),
-                            price: sell_price, amount: filled,
-                            total: order.cost.unwrap_or(sell_price * filled),
-                            fee, pnl_usd: pnl - fee,
+                            action: ExecutionAction::Buy, reason: format!("dca_buy_{}", strategy.dca_buys_done + 1),
+                            price: buy_price, amount: filled, total: cost,
+                            fee, pnl_usd: 0.0,
                             exchange_order_id: Some(order.order_id),
                             executed_at: now, error_message: None, source: None,
                         });
-                        new_status = Some(StrategyStatus::StoppedOut);
+                        // O persist_tick_result vai atualizar position, base_price, invested_amount e dca_buys_done
                     }
                     Err(e) => {
                         signal.acted = false;
                         let friendly = classify_order_error(&e, &strategy.symbol, &strategy.exchange_name);
-                        log::error!("❌ [{}] Stop loss SELL FAILED: {} | raw: {}", strategy.strategy_id, friendly, e);
+                        log::error!("❌ [{}] DCA BUY FAILED: {} | raw: {}", strategy.strategy_id, friendly, e);
+                        signal.message = format!(
+                            "❌ DCA BUY #{} falhou: {}. Tentará novamente no próximo tick.",
+                            strategy.dca_buys_done + 1, friendly
+                        );
                         executions.push(StrategyExecution {
                             execution_id: uuid::Uuid::new_v4().to_string(),
-                            action: ExecutionAction::SellFailed,
-                            reason: format!("stop_loss_failed: {}", friendly),
-                            price, amount: qty, total: qty * price,
+                            action: ExecutionAction::BuyFailed,
+                            reason: format!("dca_buy_failed: {}", friendly),
+                            price, amount: buy_qty, total: dca_amount,
                             fee: 0.0, pnl_usd: 0.0, exchange_order_id: None,
                             executed_at: now, error_message: Some(friendly), source: None,
                         });
@@ -504,6 +674,39 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
             ),
             acted: false, price_change_percent: pct, created_at: now, source: None,
         });
+    } else if config.dca_enabled && config.dca_buy_amount_usd > 0.0
+              && strategy.dca_buys_done < config.dca_max_buys {
+        // DCA: verificar se preço caiu dca_trigger_percent% abaixo do preço médio (entry)
+        let dca_trigger_price = entry * (1.0 - config.dca_trigger_percent / 100.0);
+        if price <= dca_trigger_price {
+            signals.push(StrategySignal {
+                signal_type: SignalType::DcaBuy, price,
+                message: format!(
+                    "📉 DCA #{}: preço {:.2} caiu {:.2}% abaixo da média {:.2} (trigger DCA: {:.2}). Comprando +${:.2}. ({}/{} compras DCA)",
+                    strategy.dca_buys_done + 1, price, pct.abs(), entry, dca_trigger_price,
+                    config.dca_buy_amount_usd, strategy.dca_buys_done, config.dca_max_buys
+                ),
+                acted: false, price_change_percent: pct, created_at: now, source: None,
+            });
+        } else {
+            let diff_trigger = trigger - price;
+            let diff_trigger_pct = (diff_trigger / price) * 100.0;
+            let diff_dca = price - dca_trigger_price;
+            let diff_dca_pct = (diff_dca / price) * 100.0;
+            let highest = position.highest_price;
+            let drawdown = if highest > 0.0 { ((highest - price) / highest) * 100.0 } else { 0.0 };
+            signals.push(StrategySignal {
+                signal_type: SignalType::Info, price,
+                message: format!(
+                    "📊 Em posição: {:.6} un, entrada {:.2}. Preço {:.2} ({:+.2}%). PnL: ${:.2}. TP: faltam {:.2} ({:.2}%). DCA #{}: faltam {:.2} ({:.2}%) para comprar mais. Máxima: {:.2} (drawdown: {:.2}%).",
+                    position.quantity, entry, price, pct, unrealized_pnl,
+                    diff_trigger, diff_trigger_pct,
+                    strategy.dca_buys_done + 1, diff_dca, diff_dca_pct,
+                    highest, drawdown
+                ),
+                acted: false, price_change_percent: pct, created_at: now, source: None,
+            });
+        }
     } else {
         let diff_trigger = trigger - price;
         let diff_trigger_pct = (diff_trigger / price) * 100.0;
@@ -569,6 +772,22 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             acted: false, price_change_percent: pct, created_at: now, source: None,
         });
         return;
+    } else if config.dca_enabled && config.dca_buy_amount_usd > 0.0
+              && strategy.dca_buys_done < config.dca_max_buys {
+        let dca_trigger_price = entry * (1.0 - config.dca_trigger_percent / 100.0);
+        if price <= dca_trigger_price {
+            signals.push(StrategySignal {
+                signal_type: SignalType::DcaBuy, price,
+                message: format!(
+                    "📉 DCA #{} durante gradual: preço {:.2} caiu abaixo de {:.2}. Comprando +${:.2}. ({}/{} lotes vendidos, {}/{} DCAs)",
+                    strategy.dca_buys_done + 1, price, dca_trigger_price,
+                    config.dca_buy_amount_usd, executed_lots, total_lots,
+                    strategy.dca_buys_done, config.dca_max_buys
+                ),
+                acted: false, price_change_percent: pct, created_at: now, source: None,
+            });
+            return;
+        }
     }
 
     let timer_secs = config.timer_gradual_min * 60;
@@ -870,6 +1089,23 @@ pub async fn persist_tick_result(
         .count() as i32;
     if new_exec_count > 0 {
         update_inc.insert(format!("{}.total_executions", p), new_exec_count);
+    }
+
+    // ── DCA: atualizar base_price (preço médio), invested_amount e dca_buys_done ──
+    let dca_buys_in_result = result.executions.iter()
+        .filter(|e| e.action == ExecutionAction::Buy && e.reason.starts_with("dca_buy"))
+        .count() as i32;
+    if dca_buys_in_result > 0 {
+        update_inc.insert(format!("{}.dca_buys_done", p), dca_buys_in_result);
+        // Atualizar base_price e invested_amount com o novo preço médio
+        if let Some(ref pos) = current_position {
+            update_set.insert(format!("{}.config.base_price", p), pos.entry_price);
+            update_set.insert(format!("{}.config.invested_amount", p), pos.total_cost);
+            log::info!(
+                "📉 [{}] DCA persist: novo base_price={:.2}, invested_amount={:.2}, dca_buys_done += {}",
+                strategy.strategy_id, pos.entry_price, pos.total_cost, dca_buys_in_result
+            );
+        }
     }
 
     for idx in &gradual_lot_indices_executed {

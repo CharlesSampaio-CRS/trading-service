@@ -74,10 +74,26 @@ pub struct StrategyConfig {
     pub timer_gradual_min: i64,
     #[serde(default = "default_time_execution")]
     pub time_execution_min: i64,
+    /// DCA (Dollar Cost Averaging) — compra mais quando o preço cai.
+    /// Se true, ao invés de stop loss (vender com prejuízo), compra mais
+    /// para baixar o preço médio e facilitar atingir o TP.
+    #[serde(default)]
+    pub dca_enabled: bool,
+    /// Valor em USD para cada compra DCA (ex: 36.0 = comprar +$36)
+    #[serde(default)]
+    pub dca_buy_amount_usd: f64,
+    /// Queda percentual do preço médio para acionar DCA (ex: 5.0 = -5%)
+    #[serde(default = "default_dca_trigger")]
+    pub dca_trigger_percent: f64,
+    /// Máximo de compras DCA extras (proteção contra queda infinita)
+    #[serde(default = "default_dca_max")]
+    pub dca_max_buys: i32,
 }
 
 fn default_timer_gradual() -> i64 { 15 }
 fn default_time_execution() -> i64 { 120 }
+fn default_dca_trigger() -> f64 { 5.0 }
+fn default_dca_max() -> i32 { 3 }
 
 impl Default for StrategyConfig {
     fn default() -> Self {
@@ -93,6 +109,10 @@ impl Default for StrategyConfig {
             gradual_lots: vec![],
             timer_gradual_min: 15,
             time_execution_min: 120,
+            dca_enabled: false,
+            dca_buy_amount_usd: 0.0,
+            dca_trigger_percent: 5.0,
+            dca_max_buys: 3,
         }
     }
 }
@@ -186,6 +206,7 @@ pub enum SignalType {
     TakeProfit,
     StopLoss,
     GradualSell,
+    DcaBuy,
     Expired,
     Info,
 }
@@ -196,6 +217,7 @@ impl std::fmt::Display for SignalType {
             SignalType::TakeProfit => write!(f, "take_profit"),
             SignalType::StopLoss => write!(f, "stop_loss"),
             SignalType::GradualSell => write!(f, "gradual_sell"),
+            SignalType::DcaBuy => write!(f, "dca_buy"),
             SignalType::Expired => write!(f, "expired"),
             SignalType::Info => write!(f, "info"),
         }
@@ -275,6 +297,9 @@ pub struct StrategyItem {
     pub total_pnl_usd: f64,
     #[serde(default)]
     pub total_executions: i32,
+    /// Número de compras DCA já realizadas nesta estratégia.
+    #[serde(default)]
+    pub dca_buys_done: i32,
     pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -341,6 +366,7 @@ pub struct StrategyResponse {
     pub error_message: Option<String>,
     pub total_pnl_usd: f64,
     pub total_executions: i32,
+    pub dca_buys_done: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<StrategyStatsResponse>,
     pub started_at: i64,
@@ -400,6 +426,7 @@ impl From<StrategyItem> for StrategyResponse {
             error_message: item.error_message,
             total_pnl_usd: item.total_pnl_usd,
             total_executions: item.total_executions,
+            dca_buys_done: item.dca_buys_done,
             stats: Some(stats),
             started_at: item.started_at,
             created_at: item.created_at,
@@ -424,6 +451,7 @@ pub struct StrategyListItem {
     pub last_price: Option<f64>,
     pub total_pnl_usd: f64,
     pub total_executions: i32,
+    pub dca_buys_done: i32,
     pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -444,6 +472,7 @@ impl From<StrategyItem> for StrategyListItem {
             last_price: item.last_price,
             total_pnl_usd: item.total_pnl_usd,
             total_executions: item.total_executions,
+            dca_buys_done: item.dca_buys_done,
             started_at: item.started_at,
             created_at: item.created_at,
             updated_at: item.updated_at,

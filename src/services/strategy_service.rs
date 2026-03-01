@@ -2,7 +2,7 @@ use crate::{
     ccxt::CCXTClient,
     database::MongoDB,
     models::{
-        DecryptedExchange, ExecutionAction, PositionInfo, StrategyItem,
+        Balance, DecryptedExchange, ExecutionAction, PositionInfo, StrategyItem,
         StrategyExecution, StrategySignal, StrategyStatus, SignalType,
         UserStrategies,
     },
@@ -10,6 +10,7 @@ use crate::{
     utils::thread_pool::spawn_ccxt_blocking,
 };
 use mongodb::bson::doc;
+use std::collections::HashMap;
 
 const COLLECTION: &str = "user_strategy";
 
@@ -39,6 +40,21 @@ pub async fn fetch_current_price(
         let ticker = client.fetch_ticker_sync(&symbol)?;
         ticker.get("last").and_then(|v| v.as_f64())
             .ok_or_else(|| format!("No 'last' price for {}", symbol))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+/// Buscar saldo disponível (free) de todos os ativos na exchange.
+async fn fetch_balance(exchange: &DecryptedExchange) -> Result<HashMap<String, Balance>, String> {
+    let ccxt_id = exchange.ccxt_id.clone();
+    let api_key = exchange.api_key.clone();
+    let api_secret = exchange.api_secret.clone();
+    let passphrase = exchange.passphrase.clone();
+
+    spawn_ccxt_blocking(move || {
+        let client = CCXTClient::new(&ccxt_id, &api_key, &api_secret, passphrase.as_deref())?;
+        client.fetch_balance_sync()
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -214,6 +230,29 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
         _ => {}
     }
 
+    // ── Verificar saldo da exchange se houver sinais de ação ──────
+    let has_actionable = signals.iter().any(|s| matches!(
+        s.signal_type,
+        SignalType::TakeProfit | SignalType::GradualSell | SignalType::StopLoss | SignalType::DcaBuy
+    ));
+    let balances = if has_actionable {
+        match fetch_balance(exchange).await {
+            Ok(b) => Some(b),
+            Err(e) => {
+                log::warn!("⚠️ [{}] Não conseguiu buscar saldo: {}. Prosseguindo sem validação.", strategy.strategy_id, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Extrair token base e quote do symbol (ex: "SOL/USDT" → "SOL", "USDT")
+    let (base_asset, quote_asset) = {
+        let parts: Vec<&str> = strategy.symbol.split('/').collect();
+        (parts.get(0).unwrap_or(&"").to_string(), parts.get(1).unwrap_or(&"USDT").to_string())
+    };
+
     for signal in &mut signals {
         match signal.signal_type {
             SignalType::TakeProfit | SignalType::GradualSell => {
@@ -247,6 +286,24 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                         "✅ [{}] DOUBLE-CHECK OK: Investido ${:.2} → atual ${:.2} (lucro: +${:.2}). Prosseguindo com venda.",
                         strategy.strategy_id, config.invested_amount, current_value, estimated_pnl
                     );
+                }
+
+                // ── Balance check: verificar se tem saldo suficiente do token para vender ──
+                if let Some(ref bals) = balances {
+                    let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                    if token_free < sell_amount * 0.95 { // 5% margem para arredondamento
+                        log::warn!(
+                            "⚠️ [{}] SALDO INSUFICIENTE para vender {:.6} {}! Saldo livre: {:.6}. Venda BLOQUEADA.",
+                            strategy.strategy_id, sell_amount, base_asset, token_free
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas só tem {:.6} disponível na exchange. Verifique seu saldo.",
+                            sell_amount, base_asset, token_free
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
                 }
 
                 match execute_order(exchange, &strategy.symbol, "market", "sell", sell_amount, None).await {
@@ -315,6 +372,25 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 } else {
                     let qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
                     if qty <= 0.0 { continue; }
+
+                    // ── Balance check: verificar saldo do token para stop loss ──
+                    if let Some(ref bals) = balances {
+                        let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                        if token_free < qty * 0.95 {
+                            log::warn!(
+                                "⚠️ [{}] SALDO INSUFICIENTE para stop loss! Precisa: {:.6} {}, Disponível: {:.6}.",
+                                strategy.strategy_id, qty, base_asset, token_free
+                            );
+                            signal.acted = false;
+                            signal.message = format!(
+                                "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas só tem {:.6}. Verifique seu saldo na exchange.",
+                                qty, base_asset, token_free
+                            );
+                            signal.signal_type = SignalType::Info;
+                            continue;
+                        }
+                    }
+
                     match execute_order(exchange, &strategy.symbol, "market", "sell", qty, None).await {
                         Ok(order) => {
                             signal.acted = true;
@@ -356,6 +432,25 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 // ── DCA: comprar mais para baixar preço médio ──
                 let dca_amount = strategy.config.dca_buy_amount_usd;
                 if dca_amount <= 0.0 { continue; }
+
+                // ── Balance check: verificar se tem USDT suficiente para comprar ──
+                if let Some(ref bals) = balances {
+                    let quote_free = bals.get(&quote_asset).map(|b| b.free).unwrap_or(0.0);
+                    if quote_free < dca_amount * 0.95 { // 5% margem
+                        log::warn!(
+                            "⚠️ [{}] SALDO {} INSUFICIENTE para DCA! Precisa: ${:.2}, Disponível: ${:.2}. Compra BLOQUEADA.",
+                            strategy.strategy_id, quote_asset, dca_amount, quote_free
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ Saldo insuficiente para DCA! Precisa de ${:.2} {} mas só tem ${:.2} disponível. Deposite mais {} ou reduza o valor DCA.",
+                            dca_amount, quote_asset, quote_free, quote_asset
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
+                }
+
                 let buy_qty = dca_amount / price;
                 log::info!(
                     "📉 [{}] DCA BUY #{}: comprando ${:.2} = {:.6} {} @ {:.2}",

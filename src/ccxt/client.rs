@@ -152,63 +152,230 @@ impl CCXTClient {
     
     fn fetch_balance_internal(exchange: &Py<PyAny>, exchange_name: &str) -> Result<HashMap<String, Balance>, String> {
         Python::with_gil(|py| {
-            log::info!("🔍 [{}] Fetching fresh balance from CCXT (NO CACHE)...", exchange_name);
+            log::info!("🔍 [{}] Fetching ALL wallet balances from CCXT...", exchange_name);
             
-            // 1. Fetch balance 
-            // ⚠️ IMPORTANTE: Binance, MEXC e OKX NÃO aceitam parâmetros extras!
-            // Outras exchanges aceitam timestamp para bypass de cache
             let exchange_lower = exchange_name.to_lowercase();
-            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
             
-            let balance_dict = if is_restrictive {
-                // Binance/MEXC: SEM parâmetros (exchanges restritivas)
-                log::debug!("🔧 [{}] Chamando fetch_balance SEM parâmetros (exchange restritiva)", exchange_name);
-                exchange
-                    .as_ref(py)
-                    .call_method0("fetch_balance")
-                    .map_err(|e| format!("Failed to fetch balance: {}", e))?
-            } else {
-                // Outras exchanges: COM timestamp para bypass de cache
-                let params_dict = pyo3::types::PyDict::new(py);
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                params_dict.set_item("_t", timestamp)
-                    .map_err(|e| format!("Failed to set timestamp param: {}", e))?;
-                
-                log::debug!("🔧 [{}] Chamando fetch_balance COM timestamp: {}", exchange_name, timestamp);
-                exchange
-                    .as_ref(py)
-                    .call_method1("fetch_balance", (params_dict,))
-                    .map_err(|e| format!("Failed to fetch balance: {}", e))?
+            // ═══════════════════════════════════════════════════════════════
+            // 1. FETCH ALL WALLET TYPES (spot, funding, fiat, margin, etc.)
+            // ═══════════════════════════════════════════════════════════════
+            // Cada exchange tem carteiras diferentes:
+            //   MEXC:     spot, funding (PIX/fiat vai para funding)
+            //   Binance:  spot, funding, margin, future
+            //   Bybit:    spot, funding (unified account)
+            //   OKX:      spot, funding (trading + funding)
+            //   Kraken:   spot (tudo fica no spot)
+            //   KuCoin:   spot, funding (trade + main)
+            //   Gate.io:  spot, funding, margin
+            // Cada exchange tem carteiras/account types diferentes no CCXT:
+            //   MEXC:     spot, margin, swap (NÃO tem funding separado - PIX converte direto para USDT)
+            //   Binance:  spot, funding, margin, future, linear, delivery
+            //   Bybit:    spot, funding (unified account)
+            //   OKX:      spot, funding, swap (trading + funding)
+            //   Kraken:   spot (tudo fica no spot)
+            //   KuCoin:   spot, funding (trade + main account)
+            //   Gate.io:  spot, funding, margin, swap
+            //   Bitget:   spot, funding (mix = futures)
+            //   CoinEx:   spot (funding via transfer interno)
+            //   Coinbase: spot (tudo fica no spot)
+            //   NovaDAX:  spot (tudo fica no spot)
+            
+            let wallet_types: Vec<&str> = match exchange_lower.as_str() {
+                "binance"  => vec!["spot", "funding"],
+                "bybit"    => vec!["spot", "funding"],
+                "okx"      => vec!["spot", "funding"],
+                "kucoin"   => vec!["spot", "funding"],
+                "gateio" | "gate.io" => vec!["spot", "funding"],
+                "bitget"   => vec!["spot", "funding"],
+                // MEXC, CoinEx, Kraken, Coinbase, NovaDAX: só spot
+                _ => vec!["spot"],
             };
             
-            log::debug!("✅ [{}] Balance fetched from CCXT (no cache)", exchange_name);
+            log::info!("📦 [{}] Wallet types to fetch: {:?}", exchange_name, wallet_types);
             
-            // 2. Fetch tickers (prices AND change_24h) - non-blocking if fails
-            // 🔥 REAL-TIME: Adiciona timestamp para garantir bypass de cache (exceto exchanges restritivas)
+            // Dict mesclado com todos os wallets
+            let merged_total = pyo3::types::PyDict::new(py);
+            let merged_free = pyo3::types::PyDict::new(py);
+            let merged_used = pyo3::types::PyDict::new(py);
+            
+            for wallet_type in &wallet_types {
+                let balance_result = if *wallet_type == "spot" {
+                    // Spot: chamada padrão sem parâmetros (exchanges restritivas)
+                    log::debug!("🔧 [{}] Fetching '{}' balance...", exchange_name, wallet_type);
+                    exchange.as_ref(py).call_method0("fetch_balance")
+                } else {
+                    // Funding/fiat/margin: com parâmetro type
+                    log::debug!("🔧 [{}] Fetching '{}' balance...", exchange_name, wallet_type);
+                    let params = pyo3::types::PyDict::new(py);
+                    params.set_item("type", *wallet_type).ok();
+                    exchange.as_ref(py).call_method1("fetch_balance", (params,))
+                };
+                
+                match balance_result {
+                    Ok(wallet_dict) => {
+                        // Extrai total/free/used desse wallet
+                        let w_total = wallet_dict.get_item("total").ok();
+                        let w_free = wallet_dict.get_item("free").ok();
+                        let w_used = wallet_dict.get_item("used").ok();
+                        
+                        let mut wallet_count = 0u32;
+                        
+                        if let Some(total_ref) = w_total {
+                            if let Ok(total_dict) = total_ref.downcast::<PyDict>() {
+                                for (key, value) in total_dict.iter() {
+                                    let symbol: String = key.extract().unwrap_or_default();
+                                    let amount: f64 = value.extract().unwrap_or(0.0);
+                                    
+                                    if amount > 0.0 {
+                                        wallet_count += 1;
+                                        
+                                        // Total: soma com existente
+                                        let existing: f64 = merged_total
+                                            .get_item(&symbol).ok()
+                                            .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                            .unwrap_or(0.0);
+                                        merged_total.set_item(&symbol, existing + amount).ok();
+                                        
+                                        // Free
+                                        let free_amt: f64 = w_free
+                                            .and_then(|f| f.downcast::<PyDict>().ok())
+                                            .and_then(|d| d.get_item(&symbol).ok())
+                                            .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                            .unwrap_or(0.0);
+                                        let existing_free: f64 = merged_free
+                                            .get_item(&symbol).ok()
+                                            .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                            .unwrap_or(0.0);
+                                        merged_free.set_item(&symbol, existing_free + free_amt).ok();
+                                        
+                                        // Used
+                                        let used_amt: f64 = w_used
+                                            .and_then(|u| u.downcast::<PyDict>().ok())
+                                            .and_then(|d| d.get_item(&symbol).ok())
+                                            .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                            .unwrap_or(0.0);
+                                        let existing_used: f64 = merged_used
+                                            .get_item(&symbol).ok()
+                                            .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                            .unwrap_or(0.0);
+                                        merged_used.set_item(&symbol, existing_used + used_amt).ok();
+                                        
+                                        if *wallet_type != "spot" && amount > 0.001 {
+                                            log::info!("🏦 [{}] {} wallet: {} = {:.6} (merged total: {:.6})", 
+                                                exchange_name, wallet_type, symbol, amount, existing + amount);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        log::info!("✅ [{}] '{}' wallet: {} assets with balance", exchange_name, wallet_type, wallet_count);
+                    }
+                    Err(e) => {
+                        if *wallet_type == "spot" {
+                            // Spot falhou = erro crítico
+                            return Err(format!("[{}] Failed to fetch spot balance: {}", exchange_name, e));
+                        }
+                        // Outros wallets falhando é ok (nem toda exchange suporta todos)
+                        log::warn!("⚠️  [{}] Could not fetch '{}' balance: {} (skipping)", 
+                            exchange_name, wallet_type, e);
+                    }
+                }
+            }
+            
+            // ═══════════════════════════════════════════════════════════════
+            // 1b. MEXC FIAT WALLET (carteira fiat separada, não suportada pelo CCXT padrão)
+            // ═══════════════════════════════════════════════════════════════
+            // Na MEXC, depósitos via PIX vão para a carteira "Fiat" que é acessível
+            // apenas via API v2: spot2PrivateGetAccountBalance
+            if exchange_lower == "mexc" {
+                log::info!("🏦 [{}] Fetching Fiat wallet via spot2 API v2...", exchange_name);
+                match exchange.as_ref(py).call_method0("spot2PrivateGetAccountBalance") {
+                    Ok(v2_response) => {
+                        // A resposta v2 é: {"code": 200, "data": {"balances": [{"asset": "BRL", "free": "50.0", "locked": "0"}]}}
+                        // Ou pode retornar diferente — vamos extrair
+                        if let Ok(v2_dict) = v2_response.downcast::<PyDict>() {
+                            // Tenta extrair data.balances
+                            let balances_list = v2_dict.get_item("data").ok().flatten()
+                                .and_then(|data| data.downcast::<PyDict>().ok())
+                                .and_then(|data_dict| data_dict.get_item("balances").ok().flatten())
+                                .and_then(|bal| bal.downcast::<pyo3::types::PyList>().ok());
+                            
+                            if let Some(bal_list) = balances_list {
+                                let mut fiat_count = 0u32;
+                                for item in bal_list.iter() {
+                                    if let Ok(item_dict) = item.downcast::<PyDict>() {
+                                        let asset: String = item_dict.get_item("asset").ok()
+                                            .flatten()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        let free_str: String = item_dict.get_item("free").ok()
+                                            .flatten()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        let locked_str: String = item_dict.get_item("locked").ok()
+                                            .flatten()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        
+                                        let free_val: f64 = free_str.parse().unwrap_or(0.0);
+                                        let locked_val: f64 = locked_str.parse().unwrap_or(0.0);
+                                        let total_val = free_val + locked_val;
+                                        
+                                        if total_val > 0.0 {
+                                            // Verifica se é um ativo que não está no spot (provavelmente fiat)
+                                            let existing: f64 = merged_total
+                                                .get_item(&asset).ok()
+                                                .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                                .unwrap_or(0.0);
+                                            
+                                            // Só adiciona se o v2 tem MAIS do que o spot 
+                                            // (para evitar duplicação — v2 pode incluir spot também)
+                                            if total_val > existing {
+                                                let diff = total_val - existing;
+                                                if diff > 0.0001 {
+                                                    merged_total.set_item(&asset, total_val).ok();
+                                                    merged_free.set_item(&asset, free_val).ok();
+                                                    merged_used.set_item(&asset, locked_val).ok();
+                                                    fiat_count += 1;
+                                                    log::info!("🏦 [{}] Fiat/V2 wallet: {} = {:.6} (free: {:.6}, locked: {:.6}, was: {:.6})", 
+                                                        exchange_name, asset, total_val, free_val, locked_val, existing);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                log::info!("✅ [{}] Fiat/V2 wallet: {} new/updated assets", exchange_name, fiat_count);
+                            } else {
+                                log::warn!("⚠️  [{}] V2 response has unexpected format: {:?}", exchange_name, v2_dict);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("⚠️  [{}] Could not fetch Fiat/V2 balance: {} (API key may lack permissions)", exchange_name, e);
+                    }
+                }
+            }
+            
+            // ═══════════════════════════════════════════════════════════════
+            // 2. FETCH TICKERS (prices + change_24h)
+            // ═══════════════════════════════════════════════════════════════
             let (tickers, changes, brl_usd_rate) = {
-                // ⚠️ Algumas exchanges (Binance, MEXC, OKX) não aceitam parâmetros personalizados
-                let exchange_lower = exchange_name.to_lowercase();
-                let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
+                // Exchanges restritivas não aceitam parâmetros extras no fetch_tickers
+                let is_restrictive = matches!(exchange_lower.as_str(), 
+                    "binance" | "mexc" | "okx" | "bybit");
                 
                 let tickers_result = if is_restrictive {
-                    // Exchanges restritivas: SEM parâmetros
-                    log::debug!("🔧 [{}] Calling fetch_tickers WITHOUT params (restrictive exchange)", exchange_name);
+                    log::debug!("🔧 [{}] Calling fetch_tickers WITHOUT params (restrictive)", exchange_name);
                     exchange.as_ref(py).call_method0("fetch_tickers")
                 } else {
-                    // Outras exchanges: COM timestamp para bypass de cache
                     let params_dict = pyo3::types::PyDict::new(py);
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_millis();
-                    if let Err(e) = params_dict.set_item("_t", timestamp) {
-                        log::warn!("⚠️  Could not set timestamp for {}: {}", exchange_name, e);
-                    }
-                    
-                    log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {} (NO CACHE)", exchange_name, timestamp);
+                    params_dict.set_item("_t", timestamp).ok();
+                    log::debug!("🔧 [{}] Calling fetch_tickers WITH timestamp: {}", exchange_name, timestamp);
                     exchange.as_ref(py).call_method1("fetch_tickers", (params_dict,))
                 };
                 
@@ -299,38 +466,23 @@ impl CCXTClient {
                 }
             };
             
-            let total = balance_dict
-                .get_item("total")
-                .map_err(|e| format!("Failed to get total: {}", e))?;
-            
-            let free = balance_dict
-                .get_item("free")
-                .map_err(|e| format!("Failed to get free: {}", e))?;
-            
-            let used = balance_dict
-                .get_item("used")
-                .map_err(|e| format!("Failed to get used: {}", e))?;
-            
+            // ═══════════════════════════════════════════════════════════════
+            // 3. BUILD BALANCES FROM MERGED WALLETS
+            // ═══════════════════════════════════════════════════════════════
             let mut balances = HashMap::new();
             
-            // Convert Python dict to Rust HashMap
-            if let Ok(total_dict) = total.downcast::<PyDict>() {
-                for (key, value) in total_dict.iter() {
+            for (key, value) in merged_total.iter() {
                     let symbol: String = key.extract().unwrap_or_default();
                     let total_amount: f64 = value.extract().unwrap_or(0.0);
                     
                     if total_amount > 0.0 {
-                        let free_amount: f64 = free
-                            .downcast::<PyDict>()
-                            .ok()
-                            .and_then(|d| d.get_item(&symbol).ok())
+                        let free_amount: f64 = merged_free
+                            .get_item(&symbol).ok()
                             .and_then(|opt| opt.and_then(|v| v.extract().ok()))
                             .unwrap_or(0.0);
                         
-                        let used_amount: f64 = used
-                            .downcast::<PyDict>()
-                            .ok()
-                            .and_then(|d| d.get_item(&symbol).ok())
+                        let used_amount: f64 = merged_used
+                            .get_item(&symbol).ok()
                             .and_then(|opt| opt.and_then(|v| v.extract().ok()))
                             .unwrap_or(0.0);
                         
@@ -404,7 +556,6 @@ impl CCXTClient {
                         );
                     }
                 }
-            }
             
             Ok(balances)
         })

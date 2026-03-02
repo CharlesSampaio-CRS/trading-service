@@ -167,21 +167,27 @@ impl CCXTClient {
             //   Kraken:   spot (tudo fica no spot)
             //   KuCoin:   spot, funding (trade + main)
             //   Gate.io:  spot, funding, margin
-            //   Bitget:   spot, funding, margin
-            //   CoinEx:   spot, funding
+            // Cada exchange tem carteiras/account types diferentes no CCXT:
+            //   MEXC:     spot, margin, swap (NÃO tem funding separado - PIX converte direto para USDT)
+            //   Binance:  spot, funding, margin, future, linear, delivery
+            //   Bybit:    spot, funding (unified account)
+            //   OKX:      spot, funding, swap (trading + funding)
+            //   Kraken:   spot (tudo fica no spot)
+            //   KuCoin:   spot, funding (trade + main account)
+            //   Gate.io:  spot, funding, margin, swap
+            //   Bitget:   spot, funding (mix = futures)
+            //   CoinEx:   spot (funding via transfer interno)
             //   Coinbase: spot (tudo fica no spot)
             //   NovaDAX:  spot (tudo fica no spot)
             
             let wallet_types: Vec<&str> = match exchange_lower.as_str() {
-                "mexc"     => vec!["spot", "funding"],
                 "binance"  => vec!["spot", "funding"],
                 "bybit"    => vec!["spot", "funding"],
                 "okx"      => vec!["spot", "funding"],
                 "kucoin"   => vec!["spot", "funding"],
                 "gateio" | "gate.io" => vec!["spot", "funding"],
                 "bitget"   => vec!["spot", "funding"],
-                "coinex"   => vec!["spot", "funding"],
-                // Exchanges que só têm spot (Kraken, Coinbase, NovaDAX, etc.)
+                // MEXC, CoinEx, Kraken, Coinbase, NovaDAX: só spot
                 _ => vec!["spot"],
             };
             
@@ -273,6 +279,80 @@ impl CCXTClient {
                         // Outros wallets falhando é ok (nem toda exchange suporta todos)
                         log::warn!("⚠️  [{}] Could not fetch '{}' balance: {} (skipping)", 
                             exchange_name, wallet_type, e);
+                    }
+                }
+            }
+            
+            // ═══════════════════════════════════════════════════════════════
+            // 1b. MEXC FIAT WALLET (carteira fiat separada, não suportada pelo CCXT padrão)
+            // ═══════════════════════════════════════════════════════════════
+            // Na MEXC, depósitos via PIX vão para a carteira "Fiat" que é acessível
+            // apenas via API v2: spot2PrivateGetAccountBalance
+            if exchange_lower == "mexc" {
+                log::info!("🏦 [{}] Fetching Fiat wallet via spot2 API v2...", exchange_name);
+                match exchange.as_ref(py).call_method0("spot2PrivateGetAccountBalance") {
+                    Ok(v2_response) => {
+                        // A resposta v2 é: {"code": 200, "data": {"balances": [{"asset": "BRL", "free": "50.0", "locked": "0"}]}}
+                        // Ou pode retornar diferente — vamos extrair
+                        if let Ok(v2_dict) = v2_response.downcast::<PyDict>() {
+                            // Tenta extrair data.balances
+                            let balances_list = v2_dict.get_item("data").ok().flatten()
+                                .and_then(|data| data.downcast::<PyDict>().ok())
+                                .and_then(|data_dict| data_dict.get_item("balances").ok().flatten())
+                                .and_then(|bal| bal.downcast::<pyo3::types::PyList>().ok());
+                            
+                            if let Some(bal_list) = balances_list {
+                                let mut fiat_count = 0u32;
+                                for item in bal_list.iter() {
+                                    if let Ok(item_dict) = item.downcast::<PyDict>() {
+                                        let asset: String = item_dict.get_item("asset").ok()
+                                            .flatten()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        let free_str: String = item_dict.get_item("free").ok()
+                                            .flatten()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        let locked_str: String = item_dict.get_item("locked").ok()
+                                            .flatten()
+                                            .and_then(|v| v.extract().ok())
+                                            .unwrap_or_default();
+                                        
+                                        let free_val: f64 = free_str.parse().unwrap_or(0.0);
+                                        let locked_val: f64 = locked_str.parse().unwrap_or(0.0);
+                                        let total_val = free_val + locked_val;
+                                        
+                                        if total_val > 0.0 {
+                                            // Verifica se é um ativo que não está no spot (provavelmente fiat)
+                                            let existing: f64 = merged_total
+                                                .get_item(&asset).ok()
+                                                .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                                .unwrap_or(0.0);
+                                            
+                                            // Só adiciona se o v2 tem MAIS do que o spot 
+                                            // (para evitar duplicação — v2 pode incluir spot também)
+                                            if total_val > existing {
+                                                let diff = total_val - existing;
+                                                if diff > 0.0001 {
+                                                    merged_total.set_item(&asset, total_val).ok();
+                                                    merged_free.set_item(&asset, free_val).ok();
+                                                    merged_used.set_item(&asset, locked_val).ok();
+                                                    fiat_count += 1;
+                                                    log::info!("🏦 [{}] Fiat/V2 wallet: {} = {:.6} (free: {:.6}, locked: {:.6}, was: {:.6})", 
+                                                        exchange_name, asset, total_val, free_val, locked_val, existing);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                log::info!("✅ [{}] Fiat/V2 wallet: {} new/updated assets", exchange_name, fiat_count);
+                            } else {
+                                log::warn!("⚠️  [{}] V2 response has unexpected format: {:?}", exchange_name, v2_dict);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("⚠️  [{}] Could not fetch Fiat/V2 balance: {} (API key may lack permissions)", exchange_name, e);
                     }
                 }
             }
@@ -1096,6 +1176,143 @@ impl CCXTClient {
         })
     }
     
+    /// Busca todos os pares de trading disponíveis (ativos) para um token específico
+    /// Retorna ex: ["BTC/USDT", "BTC/BRL", "BTC/ETH"] para token "BTC"
+    pub fn get_available_pairs_for_token(&self, token: &str) -> Result<Vec<serde_json::Value>, String> {
+        Python::with_gil(|py| {
+            let token_upper = token.trim().to_uppercase();
+            
+            // Exchanges restritivas não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
+            
+            let markets = if is_restrictive {
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), None)
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            } else {
+                let params = pyo3::types::PyDict::new(py);
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), Some(params))
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            };
+
+            let mut pairs = Vec::new();
+
+            if let Ok(markets_list) = markets.downcast::<PyList>() {
+                for market in markets_list.iter() {
+                    let market_dict = match market.downcast::<PyDict>() {
+                        Ok(dict) => dict,
+                        Err(_) => continue,
+                    };
+
+                    // Verificar se está ativo
+                    let is_active = market_dict
+                        .get_item("active")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<bool>().ok())
+                        .unwrap_or(false);
+
+                    if !is_active {
+                        continue;
+                    }
+
+                    // Verificar se é spot (não futures/swap)
+                    let market_type = market_dict
+                        .get_item("type")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default();
+
+                    if market_type != "spot" {
+                        continue;
+                    }
+
+                    let base = market_dict
+                        .get_item("base")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default()
+                        .to_uppercase();
+
+                    let quote = market_dict
+                        .get_item("quote")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default()
+                        .to_uppercase();
+
+                    let symbol = market_dict
+                        .get_item("symbol")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default();
+
+                    // O token pode ser base OU quote
+                    if base == token_upper || quote == token_upper {
+                        // Extrair limites mínimos
+                        let min_amount = market_dict
+                            .get_item("limits")
+                            .ok()
+                            .flatten()
+                            .and_then(|l| l.downcast::<PyDict>().ok())
+                            .and_then(|l| l.get_item("amount").ok().flatten())
+                            .and_then(|a| a.downcast::<PyDict>().ok())
+                            .and_then(|a| a.get_item("min").ok().flatten())
+                            .and_then(|v| v.extract::<f64>().ok());
+
+                        let min_cost = market_dict
+                            .get_item("limits")
+                            .ok()
+                            .flatten()
+                            .and_then(|l| l.downcast::<PyDict>().ok())
+                            .and_then(|l| l.get_item("cost").ok().flatten())
+                            .and_then(|a| a.downcast::<PyDict>().ok())
+                            .and_then(|a| a.get_item("min").ok().flatten())
+                            .and_then(|v| v.extract::<f64>().ok());
+
+                        pairs.push(serde_json::json!({
+                            "symbol": symbol,
+                            "base": base,
+                            "quote": quote,
+                            "active": true,
+                            "min_amount": min_amount,
+                            "min_cost": min_cost,
+                        }));
+                    }
+                }
+            }
+
+            // Ordenar: USDT primeiro, depois BRL, depois outros
+            pairs.sort_by(|a, b| {
+                let qa = a["quote"].as_str().unwrap_or("");
+                let qb = b["quote"].as_str().unwrap_or("");
+                let order = |q: &str| -> u8 {
+                    match q {
+                        "USDT" => 0,
+                        "BRL" => 1,
+                        "USDC" => 2,
+                        "BTC" => 3,
+                        "ETH" => 4,
+                        _ => 5,
+                    }
+                };
+                order(qa).cmp(&order(qb))
+            });
+
+            log::info!("🔍 Found {} active pairs for token {} on {}", pairs.len(), token_upper, self.exchange_name);
+            
+            Ok(pairs)
+        })
+    }
+
     /// Obtém informações sobre rate limits da exchange
     pub fn get_rate_limit_info(&self) -> Result<crate::services::user_exchanges_service::RateLimitInfo, String> {
         Python::with_gil(|py| {

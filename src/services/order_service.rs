@@ -114,7 +114,7 @@ async fn fetch_exchange_orders(
             match client.fetch_balance_raw() {
                 Ok(balance_obj) => {
                     let mut all_orders = Vec::new();
-                    let quote_currencies = vec!["USDT", "USDC", "BTC", "ETH"];
+                    let quote_currencies = vec!["USDT", "USDC", "BTC", "ETH", "BRL"];
                     let max_symbols = 20; // Limit to avoid rate limits
                     let mut symbols_checked = 0;
                     

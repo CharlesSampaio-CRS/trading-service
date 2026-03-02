@@ -154,6 +154,13 @@ async fn main() -> std::io::Result<()> {
                     .route("/{symbol}", web::get().to(api::tokens::get_token))  // DEVE FICAR POR ÚLTIMO (catch-all)
             )
             
+            // Token Pairs: Available trading pairs for a token (requires JWT)
+            .service(
+                web::scope("/api/v1/token-pairs")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .route("", web::post().to(api::tokens::get_available_pairs))
+            )
+            
             // ==================== CCXT REAL-TIME DATA ====================
             
             // User Exchanges: Manage connected exchanges (CRUD) - Requires JWT

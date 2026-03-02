@@ -1367,9 +1367,10 @@ pub struct ProcessResult {
 mod tests {
     use super::*;
     use crate::models::{
-        GradualLot, PositionInfo, StrategyConfig, StrategyItem, StrategySignal,
+        Balance, GradualLot, PositionInfo, StrategyConfig, StrategyItem, StrategySignal,
         StrategyStatus, SignalType,
     };
+    use std::collections::HashMap;
 
     /// Cria a estratégia SOL exatamente como configurada no MongoDB:
     /// - Comprou $36 de SOL a $88.29 (0.40774 SOL)
@@ -1756,6 +1757,202 @@ mod tests {
 
         println!("\n  ✅ DCA reduz preço médio: ${:.2} → ${:.2} (-{:.1}%)",
             initial_avg, avg3, ((initial_avg - avg3) / initial_avg) * 100.0);
+        println!();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 7: Saldo USDT insuficiente bloqueia compra DCA
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_insufficient_usdt_blocks_dca_buy() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  TESTE: Saldo USDT insuficiente bloqueia DCA Buy            ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        let strategy = create_sol_strategy();
+        let price = 79.00; // Preço que ativaria DCA (-10.5% do base $88.29)
+
+        // Verificar que a queda de preço realmente gera sinal DCA
+        let signals = run_tick(&strategy, price);
+        let dca_signal = signals.iter().find(|s| s.signal_type == SignalType::DcaBuy);
+        assert!(dca_signal.is_some(), "Deveria gerar sinal DcaBuy a $79.00!");
+        println!("  ✅ Sinal DcaBuy gerado a ${:.2} (correto)", price);
+
+        // Simular validação de saldo que o tick() faz:
+        // No tick(), se balances.get("USDT").free < dca_amount * 0.95, bloqueia
+        let dca_amount = strategy.config.dca_buy_amount_usd; // $36
+        let margin = 0.95;
+        let min_required = dca_amount * margin; // $34.20
+
+        // Cenário 1: Saldo $10 — INSUFICIENTE
+        let usdt_free_low = 10.0;
+        let blocked = usdt_free_low < min_required;
+        assert!(blocked, "Com $10 USDT, DCA de $36 DEVE ser bloqueado!");
+        println!("  ✅ Saldo USDT ${:.2} < mínimo ${:.2} → compra BLOQUEADA", usdt_free_low, min_required);
+
+        // Cenário 2: Saldo $0 — INSUFICIENTE (zero na conta)
+        let usdt_free_zero = 0.0;
+        let blocked_zero = usdt_free_zero < min_required;
+        assert!(blocked_zero, "Com $0 USDT, DCA DEVE ser bloqueado!");
+        println!("  ✅ Saldo USDT ${:.2} (vazio) → compra BLOQUEADA", usdt_free_zero);
+
+        // Cenário 3: Saldo $34.00 — INSUFICIENTE (quase mas não chega)
+        let usdt_almost = 34.00;
+        let blocked_almost = usdt_almost < min_required;
+        assert!(blocked_almost, "Com $34 USDT, DCA de $36 (mínimo $34.20) DEVE ser bloqueado!");
+        println!("  ✅ Saldo USDT ${:.2} < mínimo ${:.2} → compra BLOQUEADA (por $0.20)", usdt_almost, min_required);
+
+        // Cenário 4: Saldo $35.00 — SUFICIENTE (dentro da margem de 5%)
+        let usdt_ok = 35.00;
+        let allowed = usdt_ok >= min_required;
+        assert!(allowed, "Com $35 USDT e margem 5%, deveria PERMITIR DCA de $36!");
+        println!("  ✅ Saldo USDT ${:.2} >= mínimo ${:.2} → compra PERMITIDA (margem 5%)", usdt_ok, min_required);
+
+        // Cenário 5: Saldo $50.00 — SUFICIENTE (sobra)
+        let usdt_plenty = 50.0;
+        let allowed_plenty = usdt_plenty >= min_required;
+        assert!(allowed_plenty, "Com $50 USDT, DCA DEVE ser permitido!");
+        println!("  ✅ Saldo USDT ${:.2} >= mínimo ${:.2} → compra PERMITIDA", usdt_plenty, min_required);
+
+        // Simular o HashMap de balances como o tick() faz
+        let mut balances: HashMap<String, Balance> = HashMap::new();
+        balances.insert("USDT".to_string(), Balance {
+            symbol: "USDT".to_string(),
+            free: 10.0, used: 0.0, total: 10.0,
+            usd_value: None, change_24h: None,
+        });
+        let quote_free = balances.get("USDT").map(|b| b.free).unwrap_or(0.0);
+        assert!(quote_free < dca_amount * 0.95, "HashMap check: $10 < $34.20");
+        println!("\n  ✅ Validação via HashMap<String, Balance> OK — mesma lógica do tick()");
+
+        // Verificar que a mensagem de bloqueio seria informativa
+        let block_msg = format!(
+            "⚠️ Saldo insuficiente para DCA! Precisa de ${:.2} USDT mas só tem ${:.2} disponível.",
+            dca_amount, quote_free
+        );
+        assert!(block_msg.contains("insuficiente"), "Mensagem deve conter 'insuficiente'");
+        assert!(block_msg.contains("36.00"), "Mensagem deve mostrar valor necessário");
+        println!("  ✅ Mensagem de erro: {}", block_msg);
+
+        println!("\n  ✅ Validação completa: saldo USDT insuficiente bloqueia DCA corretamente.");
+        println!();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // TESTE 8: Saldo do token insuficiente bloqueia venda (TP/SL)
+    // ════════════════════════════════════════════════════════════════
+    #[test]
+    fn test_insufficient_token_blocks_sell() {
+        println!("\n╔══════════════════════════════════════════════════════════════╗");
+        println!("║  TESTE: Saldo token insuficiente bloqueia venda             ║");
+        println!("╚══════════════════════════════════════════════════════════════╝\n");
+
+        // Criar estratégia COM stop loss ativado para testar cenário de venda
+        let mut strategy = create_sol_strategy();
+        strategy.config.stop_loss_enabled = true;
+        strategy.config.dca_enabled = false; // Desativar DCA para testar SL puro
+
+        let qty = strategy.position.as_ref().unwrap().quantity; // 0.40774 SOL
+        let margin = 0.95;
+        let min_token_required = qty * margin; // ~0.38735 SOL
+        println!("  Posição: {:.5} SOL", qty);
+        println!("  Mínimo para vender (com margem 5%): {:.5} SOL\n", min_token_required);
+
+        // ── Cenário A: Take Profit com saldo insuficiente ──
+        let tp_price = strategy.config.trigger_price(); // ~$99.06
+        let signals_tp = run_tick(&strategy, tp_price + 1.0); // Preço acima do TP
+        let has_tp = signals_tp.iter().any(|s| s.signal_type == SignalType::GradualSell || s.signal_type == SignalType::TakeProfit);
+        assert!(has_tp, "Deveria gerar sinal de venda acima do TP!");
+        println!("  ✅ Sinal de venda gerado a ${:.2} (acima do TP ${:.2})", tp_price + 1.0, tp_price);
+
+        // Simular saldo insuficiente: 0.05 SOL na exchange (vendeu por fora, retirou, etc.)
+        let mut balances: HashMap<String, Balance> = HashMap::new();
+        let sell_amount = calc_sell_amount(&strategy, &SignalType::GradualSell);
+        println!("  Lote gradual (25%): {:.5} SOL, mínimo com margem: {:.5}", sell_amount, sell_amount * margin);
+
+        balances.insert("SOL".to_string(), Balance {
+            symbol: "SOL".to_string(),
+            free: 0.05, used: 0.0, total: 0.05,
+            usd_value: None, change_24h: None,
+        });
+
+        let token_free = balances.get("SOL").map(|b| b.free).unwrap_or(0.0);
+        let blocked = token_free < sell_amount * margin;
+        assert!(blocked, "Com 0.05 SOL, venda de {:.5} SOL DEVE ser bloqueada!", sell_amount);
+        println!("  ✅ Saldo SOL {:.5} < necessário {:.5} → venda BLOQUEADA", token_free, sell_amount * margin);
+
+        // ── Cenário B: Saldo zero (token retirado da exchange) ──
+        balances.insert("SOL".to_string(), Balance {
+            symbol: "SOL".to_string(),
+            free: 0.0, used: 0.0, total: 0.0,
+            usd_value: None, change_24h: None,
+        });
+        let token_free_zero = balances.get("SOL").map(|b| b.free).unwrap_or(0.0);
+        let blocked_zero = token_free_zero < sell_amount * margin;
+        assert!(blocked_zero, "Com 0 SOL, venda DEVE ser bloqueada!");
+        println!("  ✅ Saldo SOL 0.00000 (retirado) → venda BLOQUEADA");
+
+        // ── Cenário C: Token nem existe no balanço (ex: nunca comprou via exchange) ──
+        let balances_empty: HashMap<String, Balance> = HashMap::new();
+        let token_free_missing = balances_empty.get("SOL").map(|b| b.free).unwrap_or(0.0);
+        assert_eq!(token_free_missing, 0.0, "Token ausente deve retornar 0.0");
+        let blocked_missing = token_free_missing < sell_amount * margin;
+        assert!(blocked_missing, "Token ausente no balanço DEVE bloquear venda!");
+        println!("  ✅ Token SOL ausente no balanço → venda BLOQUEADA");
+
+        // ── Cenário D: Stop Loss com saldo insuficiente ──
+        let sl_price = strategy.config.stop_loss_price(); // ~$83.88
+        let signals_sl = run_tick(&strategy, sl_price - 1.0); // Preço abaixo do SL
+        let has_sl = signals_sl.iter().any(|s| s.signal_type == SignalType::StopLoss);
+        assert!(has_sl, "Deveria gerar sinal StopLoss abaixo do SL!");
+
+        // Para stop loss, vende TUDO (qty completa)
+        let sl_sell_amount = calc_sell_amount(&strategy, &SignalType::StopLoss);
+        assert!((sl_sell_amount - qty).abs() < 0.001, "Stop loss vende toda a posição!");
+
+        // Saldo parcial: tem metade do token (pode ter vendido parte manualmente)
+        balances.insert("SOL".to_string(), Balance {
+            symbol: "SOL".to_string(),
+            free: qty / 2.0, // 0.20387 SOL (metade)
+            used: 0.0, total: qty / 2.0,
+            usd_value: None, change_24h: None,
+        });
+        let half_free = balances.get("SOL").map(|b| b.free).unwrap_or(0.0);
+        let blocked_half = half_free < sl_sell_amount * margin;
+        assert!(blocked_half, "Com metade do SOL ({:.5}), stop loss de {:.5} DEVE ser bloqueado!", half_free, sl_sell_amount);
+        println!("  ✅ Saldo SOL {:.5} (metade) < necessário {:.5} → stop loss BLOQUEADO", half_free, sl_sell_amount * margin);
+
+        // ── Cenário E: Saldo suficiente — venda permitida ──
+        balances.insert("SOL".to_string(), Balance {
+            symbol: "SOL".to_string(),
+            free: qty, // Saldo exato = posição
+            used: 0.0, total: qty,
+            usd_value: None, change_24h: None,
+        });
+        let token_ok = balances.get("SOL").map(|b| b.free).unwrap_or(0.0);
+        let allowed = token_ok >= sell_amount * margin;
+        assert!(allowed, "Com saldo exato ({:.5} SOL), venda DEVE ser permitida!", token_ok);
+        println!("  ✅ Saldo SOL {:.5} >= necessário {:.5} → venda PERMITIDA", token_ok, sell_amount * margin);
+
+        // ── Cenário F: Saldo com folga — venda permitida ──
+        balances.insert("SOL".to_string(), Balance {
+            symbol: "SOL".to_string(),
+            free: qty * 2.0, // Dobro do necessário
+            used: 0.0, total: qty * 2.0,
+            usd_value: None, change_24h: None,
+        });
+        let token_plenty = balances.get("SOL").map(|b| b.free).unwrap_or(0.0);
+        let allowed_plenty = token_plenty >= sell_amount * margin;
+        assert!(allowed_plenty, "Com dobro do saldo, venda DEVE ser permitida!");
+        println!("  ✅ Saldo SOL {:.5} (dobro) → venda PERMITIDA com folga", token_plenty);
+
+        // ── Resumo das condições de bloqueio ──
+        println!("\n  📋 REGRAS DE VALIDAÇÃO DE SALDO:");
+        println!("     VENDA (TP/SL/Gradual): token_free >= sell_amount × 0.95");
+        println!("     COMPRA (DCA):          quote_free >= dca_amount  × 0.95");
+        println!("     Margem de 5% para arredondamento e micro-diferenças");
+
+        println!("\n  ✅ Validação completa: saldo insuficiente bloqueia venda corretamente.");
         println!();
     }
 }

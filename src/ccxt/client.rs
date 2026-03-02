@@ -657,13 +657,14 @@ impl CCXTClient {
                 _ => "fetch_orders",
             };
             
-            // ⚠️ Exchanges restritivas (Binance, MEXC, OKX, Bybit, Kraken) não aceitam parâmetros extras
+            // ⚠️ Exchanges restritivas não aceitam parâmetros extras no fetch_open_orders
             let exchange_lower = self.exchange_name.to_lowercase();
             let is_restrictive = exchange_lower == "binance" 
                 || exchange_lower == "mexc" 
                 || exchange_lower == "okx"
                 || exchange_lower == "bybit"
-                || exchange_lower == "kraken";
+                || exchange_lower == "kraken"
+                || exchange_lower == "novadax";
             
             let orders = if is_restrictive {
                 // Sem parâmetros para exchanges restritivas

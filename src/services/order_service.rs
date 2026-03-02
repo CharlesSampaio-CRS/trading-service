@@ -115,11 +115,24 @@ async fn fetch_exchange_orders(
                 Ok(balance_obj) => {
                     let mut all_orders = Vec::new();
                     let quote_currencies = vec!["USDT", "USDC", "BTC", "ETH", "BRL"];
-                    let max_symbols = 20; // Limit to avoid rate limits
+                    // Base currencies comuns para buscar ordens de compra (ex: order buy BTC/USDT quando tem saldo USDT)
+                    let common_base_currencies = vec!["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "DOT", "MATIC"];
+                    let max_symbols = 30; // Aumentado para cobrir mais pares
                     let mut symbols_checked = 0;
+                    let mut checked_symbols_set: std::collections::HashSet<String> = std::collections::HashSet::new();
                     
                     // Get markets to check if symbol exists
                     let markets = client.get_markets().ok();
+                    
+                    // Helper closure para verificar se mercado existe
+                    let check_market = |mkts: &Option<pyo3::PyObject>, py: pyo3::Python, sym: &str| -> bool {
+                        if let Some(ref mkts) = mkts {
+                            if let Ok(mkts_dict) = mkts.downcast::<PyDict>(py) {
+                                return mkts_dict.contains(sym).unwrap_or(false);
+                            }
+                        }
+                        false
+                    };
                     
                     Python::with_gil(|py| {
                         // Extract balance dict
@@ -129,36 +142,33 @@ async fn fetch_exchange_orders(
                                 if let Ok(total_dict) = total.downcast::<PyDict>() {
                                     log::debug!("📊 [MEXC] Scanning balance for active currencies...");
                                     
-                                    // Iterate through currencies with balance
+                                    // PARTE 1: Para cada moeda com saldo > 0, busca pares {moeda}/{quote}
+                                    // Isso pega ordens de VENDA (ex: REKTCOIN/USDT sell quando tem REKTCOIN)
                                     for (currency, amount) in total_dict.iter() {
                                         if symbols_checked >= max_symbols {
                                             break;
                                         }
                                         
-                                        // Check if amount > 0
                                         if let Ok(amt) = amount.extract::<f64>() {
                                             if amt > 0.0 {
                                                 if let Ok(curr) = currency.extract::<String>() {
-                                                    // Try each quote currency
+                                                    // Skip quote currencies nesta parte (serão tratadas na PARTE 2)
+                                                    if quote_currencies.contains(&curr.as_str()) {
+                                                        continue;
+                                                    }
+                                                    
                                                     for quote in &quote_currencies {
                                                         let symbol = format!("{}/{}", curr, quote);
                                                         
-                                                        // Check if market exists
-                                                        let market_exists = if let Some(ref mkts) = markets {
-                                                            if let Ok(mkts_dict) = mkts.downcast::<PyDict>(py) {
-                                                                mkts_dict.contains(&symbol).unwrap_or(false)
-                                                            } else {
-                                                                false
-                                                            }
-                                                        } else {
-                                                            false
-                                                        };
+                                                        if checked_symbols_set.contains(&symbol) {
+                                                            continue;
+                                                        }
                                                         
-                                                        if market_exists {
-                                                            log::debug!("  🔍 [MEXC] Trying symbol: {}", symbol);
+                                                        if check_market(&markets, py, &symbol) {
+                                                            log::debug!("  🔍 [MEXC] Trying symbol (base with balance): {}", symbol);
                                                             symbols_checked += 1;
+                                                            checked_symbols_set.insert(symbol.clone());
                                                             
-                                                            // Fetch orders for this symbol
                                                             match client.fetch_open_orders_with_symbol(&symbol) {
                                                                 Ok(orders) => {
                                                                     if !orders.is_empty() {
@@ -173,6 +183,58 @@ async fn fetch_exchange_orders(
                                                             
                                                             // Found valid symbol for this currency, skip other quotes
                                                             break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    // PARTE 2: Para quote currencies com saldo (ex: USDT, BRL),
+                                    // busca pares {common_base}/{quote} para encontrar ordens de COMPRA
+                                    // Ex: tem USDT → busca BTC/USDT, ETH/USDT etc para achar buy orders
+                                    for (currency, amount) in total_dict.iter() {
+                                        if symbols_checked >= max_symbols {
+                                            break;
+                                        }
+                                        
+                                        if let Ok(amt) = amount.extract::<f64>() {
+                                            if amt > 0.0 {
+                                                if let Ok(curr) = currency.extract::<String>() {
+                                                    // Só processa moedas que são quote currencies
+                                                    if !quote_currencies.contains(&curr.as_str()) {
+                                                        continue;
+                                                    }
+                                                    
+                                                    log::debug!("  📈 [MEXC] Scanning buy orders for quote: {}", curr);
+                                                    
+                                                    for base in &common_base_currencies {
+                                                        if symbols_checked >= max_symbols {
+                                                            break;
+                                                        }
+                                                        
+                                                        let symbol = format!("{}/{}", base, curr);
+                                                        
+                                                        if checked_symbols_set.contains(&symbol) {
+                                                            continue;
+                                                        }
+                                                        
+                                                        if check_market(&markets, py, &symbol) {
+                                                            log::debug!("  🔍 [MEXC] Trying symbol (buy orders): {}", symbol);
+                                                            symbols_checked += 1;
+                                                            checked_symbols_set.insert(symbol.clone());
+                                                            
+                                                            match client.fetch_open_orders_with_symbol(&symbol) {
+                                                                Ok(orders) => {
+                                                                    if !orders.is_empty() {
+                                                                        log::info!("  ✅ [MEXC] {}: {} orders (buy scan)", symbol, orders.len());
+                                                                        all_orders.extend(orders);
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    log::debug!("  ✗ [MEXC] {}: {}", symbol, e);
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }

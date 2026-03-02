@@ -453,32 +453,87 @@ pub struct Precision {
 pub async fn get_token_details_with_creds(
     request: &GetTokenDetailsRequest,
 ) -> Result<TokenDetailsResponse, String> {
-    let exchange_clone = request.exchange.clone();
-    let symbol_clone = request.symbol.clone();
+    // Determine if symbol already has a pair (e.g., "BTC/USDT") or is just base (e.g., "BTC")
+    let has_pair = request.symbol.contains('/');
     
-    let ticker_task = spawn_ccxt_blocking(move || {
-        let client = CCXTClient::new(
-            &exchange_clone.ccxt_id,
-            &exchange_clone.api_key,
-            &exchange_clone.api_secret,
-            exchange_clone.passphrase.as_deref(),
-        )?;
+    if has_pair {
+        // Direct call — symbol already has the pair
+        let exchange_clone = request.exchange.clone();
+        let symbol_clone = request.symbol.clone();
         
-        client.fetch_ticker_sync(&symbol_clone)
-    });
+        let ticker_task = spawn_ccxt_blocking(move || {
+            let client = CCXTClient::new(
+                &exchange_clone.ccxt_id,
+                &exchange_clone.api_key,
+                &exchange_clone.api_secret,
+                exchange_clone.passphrase.as_deref(),
+            )?;
+            client.fetch_ticker_sync(&symbol_clone)
+        });
+        
+        let ticker_json = ticker_task.await
+            .map_err(|e| format!("Task join error: {}", e))?
+            .map_err(|e| format!("Failed to fetch ticker: {}", e))?;
+        
+        let parts: Vec<&str> = request.symbol.split('/').collect();
+        let base = parts[0].to_string();
+        let quote = parts[1].to_string();
+        
+        return build_token_details_response(&request, &ticker_json, &base, &quote, &request.symbol);
+    }
     
-    let ticker_json = ticker_task.await
-        .map_err(|e| format!("Task join error: {}", e))?
-        .map_err(|e| format!("Failed to fetch ticker: {}", e))?;
+    // 🔄 Fallback: try multiple quote currencies until one works
+    let quote_priorities = ["USDT", "BRL", "USDC", "BTC", "ETH", "EUR"];
+    let base = request.symbol.to_uppercase();
+    let mut last_error = String::new();
     
-    // Parse symbol
-    let parts: Vec<&str> = request.symbol.split('/').collect();
-    let (base, quote) = if parts.len() == 2 {
-        (parts[0].to_string(), parts[1].to_string())
-    } else {
-        (request.symbol.clone(), "USDT".to_string())
-    };
+    for quote in &quote_priorities {
+        // Skip if base == quote (e.g., BTC/BTC)
+        if base == *quote {
+            continue;
+        }
+        
+        let pair = format!("{}/{}", base, quote);
+        let exchange_clone = request.exchange.clone();
+        let pair_clone = pair.clone();
+        
+        log::debug!("🔍 [TokenDetails] Trying pair: {} on {}", pair, request.exchange.ccxt_id);
+        
+        let ticker_task = spawn_ccxt_blocking(move || {
+            let client = CCXTClient::new(
+                &exchange_clone.ccxt_id,
+                &exchange_clone.api_key,
+                &exchange_clone.api_secret,
+                exchange_clone.passphrase.as_deref(),
+            )?;
+            client.fetch_ticker_sync(&pair_clone)
+        });
+        
+        match ticker_task.await {
+            Ok(Ok(ticker_json)) => {
+                log::info!("✅ [TokenDetails] Found pair: {} on {}", pair, request.exchange.ccxt_id);
+                return build_token_details_response(&request, &ticker_json, &base, quote, &pair);
+            }
+            Ok(Err(e)) => {
+                log::debug!("⏭️ [TokenDetails] Pair {} not available on {}: {}", pair, request.exchange.ccxt_id, e);
+                last_error = e;
+            }
+            Err(e) => {
+                last_error = format!("Task join error: {}", e);
+            }
+        }
+    }
     
+    Err(format!("No valid pair found for {} on {} (last error: {})", base, request.exchange.name, last_error))
+}
+
+fn build_token_details_response(
+    request: &GetTokenDetailsRequest,
+    ticker_json: &serde_json::Value,
+    base: &str,
+    quote: &str,
+    pair: &str,
+) -> Result<TokenDetailsResponse, String> {
     let current_price = ticker_json.get("last").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let change_24h_percent = ticker_json.get("percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let change_24h_value = (current_price * change_24h_percent) / 100.0;
@@ -489,9 +544,9 @@ pub async fn get_token_details_with_creds(
     
     Ok(TokenDetailsResponse {
         success: true,
-        symbol: base.clone(),
-        pair: request.symbol.clone(),
-        quote: quote.clone(),
+        symbol: base.to_string(),
+        pair: pair.to_string(),
+        quote: quote.to_string(),
         exchange: ExchangeInfoDetails {
             id: request.exchange.exchange_id.clone(),
             name: request.exchange.name.clone(),

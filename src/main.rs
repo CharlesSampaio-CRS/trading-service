@@ -154,6 +154,13 @@ async fn main() -> std::io::Result<()> {
                     .route("/{symbol}", web::get().to(api::tokens::get_token))  // DEVE FICAR POR ÚLTIMO (catch-all)
             )
             
+            // Token Details Secure: JWT auth, credentials from MongoDB (requires JWT)
+            .service(
+                web::scope("/api/v1/token-details")
+                    .wrap(middleware::auth::AuthMiddleware)
+                    .route("/secure", web::post().to(api::tokens::get_token_details_secure))
+            )
+            
             // Token Pairs: Available trading pairs for a token (requires JWT)
             .service(
                 web::scope("/api/v1/token-pairs")

@@ -268,6 +268,73 @@ pub async fn get_token_details_with_creds(
 }
 
 // ============================================================================
+// TOKEN DETAILS SECURE - JWT + MongoDB credentials (no frontend decryption)
+// ============================================================================
+#[derive(Debug, Deserialize)]
+pub struct TokenDetailsSecureRequest {
+    pub exchange_id: String,
+    pub symbol: String,
+}
+
+// POST /tokens/details/secure - Uses JWT auth, credentials from MongoDB
+pub async fn get_token_details_secure(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+    body: web::Json<TokenDetailsSecureRequest>,
+) -> HttpResponse {
+    let user_id = &user.sub;
+    
+    log::info!("🔐 POST /tokens/details/secure - symbol: {}, exchange_id: {}, user: {}", 
+        body.symbol, body.exchange_id, user_id);
+    
+    // 1. Buscar exchanges descriptografadas do MongoDB
+    let exchanges = match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exs) => exs,
+        Err(e) => {
+            log::error!("❌ Error fetching exchanges: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Error fetching exchanges: {}", e)
+            }));
+        }
+    };
+    
+    // 2. Encontrar a exchange específica pelo ID
+    let exchange = match exchanges.into_iter().find(|ex| ex.exchange_id == body.exchange_id) {
+        Some(ex) => ex,
+        None => {
+            log::warn!("⚠️ Exchange {} not found for user {}", body.exchange_id, user_id);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": "Exchange not found"
+            }));
+        }
+    };
+    
+    log::info!("🔍 Found exchange: {} ({})", exchange.name, exchange.ccxt_id);
+    
+    // 3. Montar request e chamar o token_service
+    let request = token_service::GetTokenDetailsRequest {
+        exchange: exchange,
+        symbol: body.symbol.clone(),
+    };
+    
+    match token_service::get_token_details_with_creds(&request).await {
+        Ok(response) => {
+            log::info!("✅ Token details retrieved for {} (secure)", body.symbol);
+            HttpResponse::Ok().json(response)
+        }
+        Err(e) => {
+            log::error!("❌ Failed to get token details: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+    }
+}
+
+// ============================================================================
 // TOKEN SEARCH WITH CREDENTIALS - LOCAL-FIRST PATTERN
 // ============================================================================
 // POST /tokens/search - Search tokens using exchange credentials from frontend

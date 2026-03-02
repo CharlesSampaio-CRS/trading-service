@@ -78,6 +78,9 @@ pub struct ExchangeCatalog {
     pub created_at: Option<Bson>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub updated_at: Option<Bson>,
+    /// Dias para expiração da API key (ex: MEXC=90). None = sem expiração.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub api_key_expiry_days: Option<i64>,
 }
 
 /// Exchange com dados descriptografados (para uso interno)

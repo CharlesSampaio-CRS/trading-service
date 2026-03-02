@@ -75,6 +75,15 @@ pub struct UserExchangeInfo {
     pub url: Option<String>,      // URL da exchange
     pub created_at: String,
     pub linked_at: String,  // Alias para created_at (compatibilidade frontend)
+    /// Dias para expiração da API key (ex: MEXC=90). None = sem expiração conhecida.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_expiry_days: Option<i64>,
+    /// Dias restantes até a API key expirar. None = sem expiração.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_until_expiry: Option<i64>,
+    /// Data estimada de expiração da API key (ISO 8601). None = sem expiração.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +113,19 @@ pub struct DeleteExchangeResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+// ==================== API KEY EXPIRY CONFIG ====================
+
+/// Retorna os dias de expiração da API key por exchange (conhecidos).
+/// None = sem expiração conhecida / ilimitada.
+fn get_api_key_expiry_days(ccxt_id: &str) -> Option<i64> {
+    match ccxt_id.to_lowercase().as_str() {
+        "mexc" => Some(90),
+        "gateio" => Some(180),
+        // Adicionar outras exchanges com expiração conhecida aqui
+        _ => None,
+    }
 }
 
 // ==================== SERVICE FUNCTIONS ====================
@@ -401,7 +423,11 @@ pub async fn list_user_exchanges(
             .find_one(doc! { "_id": exchange_oid })
             .await
         {
+            // Data de referência: reconnected_at (nova key) > created_at (primeira key)
+            let reference_date = ex.reconnected_at.as_ref().or(ex.created_at.as_ref());
+
             let created_at_str = ex.created_at
+                .as_ref()
                 .and_then(|dt| {
                     if let mongodb::bson::Bson::DateTime(dt) = dt {
                         Some(dt.to_string())
@@ -410,6 +436,25 @@ pub async fn list_user_exchanges(
                     }
                 })
                 .unwrap_or_else(|| "Unknown".to_string());
+
+            // Calcula expiração da API key
+            let expiry_days = catalog.api_key_expiry_days
+                .or_else(|| get_api_key_expiry_days(&catalog.ccxt_id));
+
+            let (days_until_expiry, api_key_expires_at) = match (expiry_days, reference_date) {
+                (Some(expiry), Some(mongodb::bson::Bson::DateTime(ref_dt))) => {
+                    let ref_millis = ref_dt.timestamp_millis();
+                    let expiry_millis = ref_millis + (expiry * 24 * 60 * 60 * 1000);
+                    let now_millis = DateTime::now().timestamp_millis();
+                    let remaining_days = (expiry_millis - now_millis) / (24 * 60 * 60 * 1000);
+
+                    // Data de expiração ISO 8601
+                    let expires_at = DateTime::from_millis(expiry_millis).to_string();
+
+                    (Some(remaining_days), Some(expires_at))
+                }
+                _ => (None, None),
+            };
             
             result.push(UserExchangeInfo {
                 exchange_id: ex.exchange_id,
@@ -422,7 +467,10 @@ pub async fn list_user_exchanges(
                 country: catalog.pais_de_origem.clone(),
                 url: catalog.url.clone(),
                 created_at: created_at_str.clone(),
-                linked_at: created_at_str,  // Mesmo valor que created_at
+                linked_at: created_at_str,
+                api_key_expiry_days: expiry_days,
+                days_until_expiry,
+                api_key_expires_at,
             });
         }
     }

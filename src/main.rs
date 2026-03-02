@@ -159,6 +159,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api/v1/token-pairs")
                     .wrap(middleware::auth::AuthMiddleware)
                     .route("", web::post().to(api::tokens::get_available_pairs))
+                    .route("/ticker", web::post().to(api::tokens::get_pair_ticker))
             )
             
             // ==================== CCXT REAL-TIME DATA ====================

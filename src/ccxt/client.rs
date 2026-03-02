@@ -1176,6 +1176,143 @@ impl CCXTClient {
         })
     }
     
+    /// Busca todos os pares de trading disponíveis (ativos) para um token específico
+    /// Retorna ex: ["BTC/USDT", "BTC/BRL", "BTC/ETH"] para token "BTC"
+    pub fn get_available_pairs_for_token(&self, token: &str) -> Result<Vec<serde_json::Value>, String> {
+        Python::with_gil(|py| {
+            let token_upper = token.trim().to_uppercase();
+            
+            // Exchanges restritivas não aceitam parâmetros extras
+            let exchange_lower = self.exchange_name.to_lowercase();
+            let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx";
+            
+            let markets = if is_restrictive {
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), None)
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            } else {
+                let params = pyo3::types::PyDict::new(py);
+                self.exchange
+                    .as_ref(py)
+                    .call_method("fetch_markets", (), Some(params))
+                    .map_err(|e| format!("Failed to fetch markets: {}", e))?
+            };
+
+            let mut pairs = Vec::new();
+
+            if let Ok(markets_list) = markets.downcast::<PyList>() {
+                for market in markets_list.iter() {
+                    let market_dict = match market.downcast::<PyDict>() {
+                        Ok(dict) => dict,
+                        Err(_) => continue,
+                    };
+
+                    // Verificar se está ativo
+                    let is_active = market_dict
+                        .get_item("active")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<bool>().ok())
+                        .unwrap_or(false);
+
+                    if !is_active {
+                        continue;
+                    }
+
+                    // Verificar se é spot (não futures/swap)
+                    let market_type = market_dict
+                        .get_item("type")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default();
+
+                    if market_type != "spot" {
+                        continue;
+                    }
+
+                    let base = market_dict
+                        .get_item("base")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default()
+                        .to_uppercase();
+
+                    let quote = market_dict
+                        .get_item("quote")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default()
+                        .to_uppercase();
+
+                    let symbol = market_dict
+                        .get_item("symbol")
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.extract::<String>().ok())
+                        .unwrap_or_default();
+
+                    // O token pode ser base OU quote
+                    if base == token_upper || quote == token_upper {
+                        // Extrair limites mínimos
+                        let min_amount = market_dict
+                            .get_item("limits")
+                            .ok()
+                            .flatten()
+                            .and_then(|l| l.downcast::<PyDict>().ok())
+                            .and_then(|l| l.get_item("amount").ok().flatten())
+                            .and_then(|a| a.downcast::<PyDict>().ok())
+                            .and_then(|a| a.get_item("min").ok().flatten())
+                            .and_then(|v| v.extract::<f64>().ok());
+
+                        let min_cost = market_dict
+                            .get_item("limits")
+                            .ok()
+                            .flatten()
+                            .and_then(|l| l.downcast::<PyDict>().ok())
+                            .and_then(|l| l.get_item("cost").ok().flatten())
+                            .and_then(|a| a.downcast::<PyDict>().ok())
+                            .and_then(|a| a.get_item("min").ok().flatten())
+                            .and_then(|v| v.extract::<f64>().ok());
+
+                        pairs.push(serde_json::json!({
+                            "symbol": symbol,
+                            "base": base,
+                            "quote": quote,
+                            "active": true,
+                            "min_amount": min_amount,
+                            "min_cost": min_cost,
+                        }));
+                    }
+                }
+            }
+
+            // Ordenar: USDT primeiro, depois BRL, depois outros
+            pairs.sort_by(|a, b| {
+                let qa = a["quote"].as_str().unwrap_or("");
+                let qb = b["quote"].as_str().unwrap_or("");
+                let order = |q: &str| -> u8 {
+                    match q {
+                        "USDT" => 0,
+                        "BRL" => 1,
+                        "USDC" => 2,
+                        "BTC" => 3,
+                        "ETH" => 4,
+                        _ => 5,
+                    }
+                };
+                order(qa).cmp(&order(qb))
+            });
+
+            log::info!("🔍 Found {} active pairs for token {} on {}", pairs.len(), token_upper, self.exchange_name);
+            
+            Ok(pairs)
+        })
+    }
+
     /// Obtém informações sobre rate limits da exchange
     pub fn get_rate_limit_info(&self) -> Result<crate::services::user_exchanges_service::RateLimitInfo, String> {
         Python::with_gil(|py| {

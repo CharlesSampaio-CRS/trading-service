@@ -1,5 +1,5 @@
 use actix_web::{web, HttpResponse};
-use crate::{database::MongoDB, services::token_service};
+use crate::{database::MongoDB, services::token_service, middleware::auth::Claims};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -329,6 +329,99 @@ pub async fn get_token_details_multi(
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "success": false,
                 "error": e
+            }))
+        }
+    }
+}
+
+// ============================================================================
+// AVAILABLE TRADING PAIRS - Pares disponíveis para um token em uma exchange
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct AvailablePairsRequest {
+    pub exchange_id: String,    // MongoDB ID da exchange do usuário
+    pub token: String,          // Token para buscar pares (ex: "BTC", "USDT")
+}
+
+/// 🔒 POST /api/v1/tokens/pairs
+/// Busca pares de trading disponíveis (ativos) para um token em uma exchange
+/// Usa JWT para autenticação e busca credenciais no MongoDB
+pub async fn get_available_pairs(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+    body: web::Json<AvailablePairsRequest>,
+) -> HttpResponse {
+    let user_id = &user.sub;
+    
+    log::info!("🔍 POST /tokens/pairs - token: {}, exchange: {} (user: {})", 
+        body.token, body.exchange_id, user_id);
+    
+    // 1. Buscar exchanges do usuário
+    let exchanges = match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exs) => exs,
+        Err(e) => {
+            log::error!("❌ Error fetching exchanges: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Error fetching exchanges: {}", e)
+            }));
+        }
+    };
+    
+    // 2. Encontrar a exchange específica
+    let exchange = match exchanges.iter().find(|ex| ex.exchange_id == body.exchange_id) {
+        Some(ex) => ex,
+        None => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": "Exchange not found"
+            }));
+        }
+    };
+    
+    // 3. Criar cliente CCXT e buscar pares
+    let ccxt_id = exchange.ccxt_id.clone();
+    let api_key = exchange.api_key.clone();
+    let api_secret = exchange.api_secret.clone();
+    let passphrase = exchange.passphrase.clone();
+    let exchange_name = exchange.name.clone();
+    let token = body.token.clone();
+    
+    let result = tokio::task::spawn_blocking(move || {
+        let client = crate::ccxt::client::CCXTClient::new(
+            &ccxt_id,
+            &api_key,
+            &api_secret,
+            passphrase.as_deref(),
+        ).map_err(|e| format!("Failed to create CCXT client: {}", e))?;
+        
+        client.get_available_pairs_for_token(&token)
+    }).await;
+    
+    match result {
+        Ok(Ok(pairs)) => {
+            log::info!("✅ Found {} pairs for {} on {}", pairs.len(), body.token, exchange_name);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "token": body.token.to_uppercase(),
+                "exchange": exchange_name,
+                "pairs": pairs,
+                "count": pairs.len()
+            }))
+        }
+        Ok(Err(e)) => {
+            log::error!("❌ Error fetching pairs: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+        Err(e) => {
+            log::error!("❌ Task error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Internal error: {}", e)
             }))
         }
     }

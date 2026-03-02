@@ -344,6 +344,12 @@ pub struct AvailablePairsRequest {
     pub token: String,          // Token para buscar pares (ex: "BTC", "USDT")
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PairTickerRequest {
+    pub exchange_id: String,    // MongoDB ID da exchange do usuário
+    pub symbol: String,         // Par de trading (ex: "BTC/USDT", "ETH/BRL")
+}
+
 /// 🔒 POST /api/v1/tokens/pairs
 /// Busca pares de trading disponíveis (ativos) para um token em uma exchange
 /// Usa JWT para autenticação e busca credenciais no MongoDB
@@ -412,6 +418,102 @@ pub async fn get_available_pairs(
         }
         Ok(Err(e)) => {
             log::error!("❌ Error fetching pairs: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+        Err(e) => {
+            log::error!("❌ Task error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Internal error: {}", e)
+            }))
+        }
+    }
+}
+
+/// 🔒 POST /api/v1/token-pairs/ticker
+/// Busca o preço atual (ticker) de um par de trading específico em uma exchange
+/// Usa JWT para autenticação e busca credenciais no MongoDB
+pub async fn get_pair_ticker(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+    body: web::Json<PairTickerRequest>,
+) -> HttpResponse {
+    let user_id = &user.sub;
+    
+    log::info!("📈 POST /token-pairs/ticker - symbol: {}, exchange: {} (user: {})", 
+        body.symbol, body.exchange_id, user_id);
+    
+    // 1. Buscar exchanges do usuário
+    let exchanges = match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exs) => exs,
+        Err(e) => {
+            log::error!("❌ Error fetching exchanges: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Error fetching exchanges: {}", e)
+            }));
+        }
+    };
+    
+    // 2. Encontrar a exchange específica
+    let exchange = match exchanges.iter().find(|ex| ex.exchange_id == body.exchange_id) {
+        Some(ex) => ex,
+        None => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": "Exchange not found"
+            }));
+        }
+    };
+    
+    // 3. Criar cliente CCXT e buscar ticker
+    let ccxt_id = exchange.ccxt_id.clone();
+    let api_key = exchange.api_key.clone();
+    let api_secret = exchange.api_secret.clone();
+    let passphrase = exchange.passphrase.clone();
+    let exchange_name = exchange.name.clone();
+    let symbol = body.symbol.clone();
+    
+    let result = tokio::task::spawn_blocking(move || {
+        let client = crate::ccxt::client::CCXTClient::new(
+            &ccxt_id,
+            &api_key,
+            &api_secret,
+            passphrase.as_deref(),
+        ).map_err(|e| format!("Failed to create CCXT client: {}", e))?;
+        
+        client.fetch_ticker_sync(&symbol)
+    }).await;
+    
+    match result {
+        Ok(Ok(ticker_json)) => {
+            let last = ticker_json.get("last").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let bid = ticker_json.get("bid").and_then(|v| v.as_f64());
+            let ask = ticker_json.get("ask").and_then(|v| v.as_f64());
+            let high = ticker_json.get("high").and_then(|v| v.as_f64());
+            let low = ticker_json.get("low").and_then(|v| v.as_f64());
+            let volume = ticker_json.get("volume").and_then(|v| v.as_f64());
+            
+            log::info!("✅ Ticker for {} on {}: last={}", body.symbol, exchange_name, last);
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "symbol": body.symbol,
+                "exchange": exchange_name,
+                "ticker": {
+                    "last": last,
+                    "bid": bid,
+                    "ask": ask,
+                    "high": high,
+                    "low": low,
+                    "volume": volume
+                }
+            }))
+        }
+        Ok(Err(e)) => {
+            log::error!("❌ Error fetching ticker: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({
                 "success": false,
                 "error": e

@@ -188,7 +188,7 @@ impl CCXTClient {
             
             // 2. Fetch tickers (prices AND change_24h) - non-blocking if fails
             // 🔥 REAL-TIME: Adiciona timestamp para garantir bypass de cache (exceto exchanges restritivas)
-            let (tickers, changes) = {
+            let (tickers, changes, brl_usd_rate) = {
                 // ⚠️ Algumas exchanges (Binance, MEXC, OKX) não aceitam parâmetros personalizados
                 let exchange_lower = exchange_name.to_lowercase();
                 let is_restrictive = exchange_lower == "binance" || exchange_lower == "mexc" || exchange_lower == "okx" || exchange_lower == "okx";
@@ -216,6 +216,7 @@ impl CCXTClient {
                     Ok(tickers_obj) => {
                         let mut prices = HashMap::new();
                         let mut percent_changes = HashMap::new();
+                        let mut usdt_brl_rate: Option<f64> = None;
                         
                         // Verifica se tickers_obj não é None
                         if tickers_obj.is_none() {
@@ -243,6 +244,11 @@ impl CCXTClient {
                                     if let Some(last) = ticker_dict.get_item("last").ok().flatten() {
                                         if let Ok(price) = last.extract::<f64>() {
                                             if price > 0.0 {  // Ignora preços zero ou negativos
+                                                // Captura USDT/BRL rate para conversão de saldo BRL
+                                                if symbol_str == "USDT/BRL" && price > 1.0 {
+                                                    usdt_brl_rate = Some(price);
+                                                    log::info!("💱 USDT/BRL rate captured: {:.4} (1 BRL = {:.4} USD)", price, 1.0 / price);
+                                                }
                                                 if let Some(base) = symbol_str.split('/').next() {
                                                     // 🔍 Busca preço em USDT para tokens que não sejam stablecoins
                                                     // Prioriza pares com USDT, depois USDC, USD e BRL
@@ -284,11 +290,11 @@ impl CCXTClient {
                             log::warn!("⚠️  Could not downcast tickers to PyDict for {}", exchange_name);
                         }
                         
-                        (prices, percent_changes)
+                        (prices, percent_changes, usdt_brl_rate)
                     }
                     Err(e) => {
                         log::warn!("⚠️  Could not fetch tickers from {}: {}", exchange_name, e);
-                        (HashMap::new(), HashMap::new())
+                        (HashMap::new(), HashMap::new(), None)
                     }
                 }
             };
@@ -338,6 +344,19 @@ impl CCXTClient {
                         {
                             // Stablecoins e USD = $1.00
                             Some(1.0)
+                        } else if symbol == "BRL" {
+                            // BRL → USD: usa taxa real do ticker USDT/BRL
+                            if let Some(usdt_brl) = brl_usd_rate {
+                                let rate = 1.0 / usdt_brl;
+                                log::info!("💱 [{}] BRL: R${:.2} × {:.4} = ${:.2} (USDT/BRL: {:.2})", 
+                                    exchange_name, total_amount, rate, total_amount * rate, usdt_brl);
+                                Some(rate)
+                            } else {
+                                // Fallback se USDT/BRL não disponível
+                                log::info!("💱 [{}] BRL: R${:.2} — no USDT/BRL ticker, fallback 0.17 USD", 
+                                    exchange_name, total_amount);
+                                Some(0.17)
+                            }
                         } else if let Some(&price) = tickers.get(&symbol) {
                             // Use ticker price
                             Some(price)

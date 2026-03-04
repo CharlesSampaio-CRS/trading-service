@@ -64,6 +64,15 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     let strategy_id = strategy.strategy_id.clone();
     let now = chrono::Utc::now().timestamp();
 
+    // ── Guard: archived/deleted strategy ──────────────────────────────
+    if strategy.deleted_at.is_some() {
+        return TickResult {
+            strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+            signals: vec![], executions: vec![], new_status: None,
+            error: Some(format!("Strategy '{}' is archived.", strategy.name)),
+        };
+    }
+
     // ── Guard: inactive strategy ────────────────────────────────────
     if !strategy.is_active {
         return TickResult {
@@ -233,7 +242,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     // ── Verificar saldo da exchange se houver sinais de ação ──────
     let has_actionable = signals.iter().any(|s| matches!(
         s.signal_type,
-        SignalType::TakeProfit | SignalType::GradualSell | SignalType::StopLoss | SignalType::DcaBuy
+        SignalType::TakeProfit | SignalType::GradualSell | SignalType::StopLoss | SignalType::DcaBuy | SignalType::BuyDip
     ));
     let balances = if has_actionable {
         match fetch_balance(exchange).await {
@@ -256,7 +265,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     for signal in &mut signals {
         match signal.signal_type {
             SignalType::TakeProfit | SignalType::GradualSell => {
-                let sell_amount = calc_sell_amount(strategy, &signal.signal_type);
+                let mut sell_amount = calc_sell_amount(strategy, &signal.signal_type);
                 if sell_amount <= 0.0 { continue; }
 
                 // ── Double-check: se invested_amount preenchido, verificar lucro real ──
@@ -292,17 +301,26 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 if let Some(ref bals) = balances {
                     let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
                     if token_free < sell_amount * 0.95 { // 5% margem para arredondamento
-                        log::warn!(
-                            "⚠️ [{}] SALDO INSUFICIENTE para vender {:.6} {}! Saldo livre: {:.6}. Venda BLOQUEADA.",
-                            strategy.strategy_id, sell_amount, base_asset, token_free
-                        );
-                        signal.acted = false;
-                        signal.message = format!(
-                            "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas só tem {:.6} disponível na exchange. Verifique seu saldo.",
-                            sell_amount, base_asset, token_free
-                        );
-                        signal.signal_type = SignalType::Info;
-                        continue;
+                        if token_free > 0.0 {
+                            // Saldo parcial: vende o que tem disponível
+                            log::warn!(
+                                "⚠️ [{}] Saldo parcial para vender: precisa {:.6} {} mas tem {:.6}. Vendendo saldo disponível.",
+                                strategy.strategy_id, sell_amount, base_asset, token_free
+                            );
+                            sell_amount = token_free;
+                        } else {
+                            log::warn!(
+                                "⚠️ [{}] SALDO ZERO para vender {:.6} {}! Venda BLOQUEADA.",
+                                strategy.strategy_id, sell_amount, base_asset
+                            );
+                            signal.acted = false;
+                            signal.message = format!(
+                                "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas não tem saldo disponível na exchange. Verifique seu saldo.",
+                                sell_amount, base_asset
+                            );
+                            signal.signal_type = SignalType::Info;
+                            continue;
+                        }
                     }
                 }
 
@@ -370,24 +388,33 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     );
                     // Será tratado no bloco DcaBuy abaixo
                 } else {
-                    let qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
+                    let mut qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
                     if qty <= 0.0 { continue; }
 
                     // ── Balance check: verificar saldo do token para stop loss ──
                     if let Some(ref bals) = balances {
                         let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
                         if token_free < qty * 0.95 {
-                            log::warn!(
-                                "⚠️ [{}] SALDO INSUFICIENTE para stop loss! Precisa: {:.6} {}, Disponível: {:.6}.",
-                                strategy.strategy_id, qty, base_asset, token_free
-                            );
-                            signal.acted = false;
-                            signal.message = format!(
-                                "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas só tem {:.6}. Verifique seu saldo na exchange.",
-                                qty, base_asset, token_free
-                            );
-                            signal.signal_type = SignalType::Info;
-                            continue;
+                            if token_free > 0.0 {
+                                // Saldo parcial: vende o que tem disponível
+                                log::warn!(
+                                    "⚠️ [{}] Saldo parcial para stop loss: precisa {:.6} {} mas tem {:.6}. Vendendo saldo disponível.",
+                                    strategy.strategy_id, qty, base_asset, token_free
+                                );
+                                qty = token_free;
+                            } else {
+                                log::warn!(
+                                    "⚠️ [{}] SALDO ZERO para stop loss! Precisa: {:.6} {}. Venda BLOQUEADA.",
+                                    strategy.strategy_id, qty, base_asset
+                                );
+                                signal.acted = false;
+                                signal.message = format!(
+                                    "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas não tem saldo. Verifique seu saldo na exchange.",
+                                    qty, base_asset
+                                );
+                                signal.signal_type = SignalType::Info;
+                                continue;
+                            }
                         }
                     }
 
@@ -508,6 +535,89 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     }
                 }
             }
+            SignalType::BuyDip => {
+                // ── Buy the Dip: compra automática na queda (funciona SEM posição) ──
+                let dip_amount = strategy.config.auto_buy_dip_amount_usd;
+                if dip_amount <= 0.0 { continue; }
+
+                // ── Balance check: verificar se tem USDT suficiente ──
+                if let Some(ref bals) = balances {
+                    let quote_free = bals.get(&quote_asset).map(|b| b.free).unwrap_or(0.0);
+                    if quote_free < dip_amount * 0.95 {
+                        log::warn!(
+                            "⚠️ [{}] SALDO {} INSUFICIENTE para Buy Dip! Precisa: ${:.2}, Disponível: ${:.2}. Compra BLOQUEADA.",
+                            strategy.strategy_id, quote_asset, dip_amount, quote_free
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ Saldo insuficiente para Buy Dip! Precisa de ${:.2} {} mas só tem ${:.2} disponível.",
+                            dip_amount, quote_asset, quote_free
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
+                }
+
+                let buy_qty = dip_amount / price;
+                log::info!(
+                    "🛒 [{}] BUY DIP #{}: comprando ${:.2} = {:.6} {} @ {:.2}",
+                    strategy.strategy_id, strategy.buy_dip_buys_done + 1, dip_amount, buy_qty, strategy.symbol, price
+                );
+                match execute_order(exchange, &strategy.symbol, "market", "buy", buy_qty, None).await {
+                    Ok(order) => {
+                        signal.acted = true;
+                        let filled = order.filled.unwrap_or(buy_qty);
+                        let buy_price = order.avg_price.unwrap_or(price);
+                        let cost = order.cost.unwrap_or(buy_price * filled);
+                        let fee = order.fee.unwrap_or(0.0);
+                        // Calcular novo preço médio se já tem posição
+                        let old_qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
+                        let old_cost = strategy.position.as_ref().map(|p| p.total_cost).unwrap_or(0.0);
+                        let new_qty = old_qty + filled;
+                        let new_cost = old_cost + cost;
+                        let new_avg = if new_qty > 0.0 { new_cost / new_qty } else { buy_price };
+                        log::info!(
+                            "✅ [{}] BUY DIP #{} OK: +{:.6} @ {:.2}. Preço médio: {:.2}. Total: {:.6} un, ${:.2} investido.",
+                            strategy.strategy_id, strategy.buy_dip_buys_done + 1, filled, buy_price, new_avg, new_qty, new_cost
+                        );
+                        signal.message = format!(
+                            "🛒 BUY DIP #{} executado! Comprou {:.6} {} @ {:.2} (${:.2}). Preço médio: {:.2}. Total investido: ${:.2}.",
+                            strategy.buy_dip_buys_done + 1, filled, strategy.symbol, buy_price, cost, new_avg, new_cost
+                        );
+                        executions.push(StrategyExecution {
+                            execution_id: uuid::Uuid::new_v4().to_string(),
+                            action: ExecutionAction::Buy, reason: format!("buy_dip_{}", strategy.buy_dip_buys_done + 1),
+                            price: buy_price, amount: filled, total: cost,
+                            fee, pnl_usd: 0.0,
+                            exchange_order_id: Some(order.order_id),
+                            executed_at: now, error_message: None, source: None,
+                        });
+                        // Se não tinha posição, o persist_tick_result vai criar uma.
+                        // Se já tinha, vai atualizar o preço médio.
+                        // Também muda status para in_position se estava monitoring.
+                        if strategy.position.is_none() {
+                            new_status = Some(StrategyStatus::InPosition);
+                        }
+                    }
+                    Err(e) => {
+                        signal.acted = false;
+                        let friendly = classify_order_error(&e, &strategy.symbol, &strategy.exchange_name);
+                        log::error!("❌ [{}] BUY DIP FAILED: {} | raw: {}", strategy.strategy_id, friendly, e);
+                        signal.message = format!(
+                            "❌ Buy Dip #{} falhou: {}. Tentará no próximo tick.",
+                            strategy.buy_dip_buys_done + 1, friendly
+                        );
+                        executions.push(StrategyExecution {
+                            execution_id: uuid::Uuid::new_v4().to_string(),
+                            action: ExecutionAction::BuyFailed,
+                            reason: format!("buy_dip_failed: {}", friendly),
+                            price, amount: buy_qty, total: dip_amount,
+                            fee: 0.0, pnl_usd: 0.0, exchange_order_id: None,
+                            executed_at: now, error_message: Some(friendly), source: None,
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -587,6 +697,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             });
         }
     } else {
+        // ── Sem posição aberta ──
         let diff_trigger = trigger - price;
         let diff_trigger_pct = if price > 0.0 { (diff_trigger / price) * 100.0 } else { 0.0 };
         let sl_info = if config.stop_loss_enabled {
@@ -594,14 +705,48 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
         } else {
             " Stop loss desativado.".to_string()
         };
-        signals.push(StrategySignal {
-            signal_type: SignalType::Info, price,
-            message: format!(
-                "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%).{}{} Aguardando entrada manual ou via exchange.",
-                price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_info, pnl_info
-            ),
-            acted: false, price_change_percent: pct, created_at: now, source: None,
-        });
+
+        // ── Auto Buy Dip: comprar na queda mesmo sem posição ──
+        if config.auto_buy_dip_enabled
+            && config.auto_buy_dip_amount_usd > 0.0
+            && strategy.buy_dip_buys_done < config.auto_buy_dip_max_buys
+        {
+            let dip_trigger = config.buy_dip_trigger_price();
+            if price <= dip_trigger {
+                signals.push(StrategySignal {
+                    signal_type: SignalType::BuyDip, price,
+                    message: format!(
+                        "🛒 BUY DIP #{}: preço {:.2} caiu {:.2}% abaixo do base {:.2} (trigger: {:.2}). Comprando ${:.2}. ({}/{} compras)",
+                        strategy.buy_dip_buys_done + 1, price, pct.abs(), config.base_price, dip_trigger,
+                        config.auto_buy_dip_amount_usd, strategy.buy_dip_buys_done, config.auto_buy_dip_max_buys
+                    ),
+                    acted: false, price_change_percent: pct, created_at: now, source: None,
+                });
+                return; // Sinal de ação gerado, não precisa do info
+            }
+            // Incluir info sobre Buy Dip no monitoramento
+            let diff_dip = price - dip_trigger;
+            let diff_dip_pct = if price > 0.0 { (diff_dip / price) * 100.0 } else { 0.0 };
+            signals.push(StrategySignal {
+                signal_type: SignalType::Info, price,
+                message: format!(
+                    "⏳ Sem posição. Preço {:.2} ({:+.2}% do base). TP: faltam {:.2} ({:.2}%). Buy Dip #{}: faltam {:.2} ({:.2}%) para comprar (trigger: {:.2}).{}{} ",
+                    price, pct, diff_trigger, diff_trigger_pct,
+                    strategy.buy_dip_buys_done + 1, diff_dip, diff_dip_pct, dip_trigger,
+                    sl_info, pnl_info
+                ),
+                acted: false, price_change_percent: pct, created_at: now, source: None,
+            });
+        } else {
+            signals.push(StrategySignal {
+                signal_type: SignalType::Info, price,
+                message: format!(
+                    "⏳ Sem posição aberta. Preço atual: {:.2} ({:+.2}% do base {:.2}). Trigger em {:.2} (faltam {:.2}, {:.2}%).{}{} Aguardando entrada manual ou via exchange.",
+                    price, pct, config.base_price, trigger, diff_trigger, diff_trigger_pct, sl_info, pnl_info
+                ),
+                acted: false, price_change_percent: pct, created_at: now, source: None,
+            });
+        }
     }
 }
 
@@ -1108,6 +1253,22 @@ pub async fn persist_tick_result(
         }
     }
 
+    // ── Buy Dip: atualizar base_price, invested_amount e buy_dip_buys_done ──
+    let buy_dip_in_result = result.executions.iter()
+        .filter(|e| e.action == ExecutionAction::Buy && e.reason.starts_with("buy_dip"))
+        .count() as i32;
+    if buy_dip_in_result > 0 {
+        update_inc.insert(format!("{}.buy_dip_buys_done", p), buy_dip_in_result);
+        if let Some(ref pos) = current_position {
+            update_set.insert(format!("{}.config.base_price", p), pos.entry_price);
+            update_set.insert(format!("{}.config.invested_amount", p), pos.total_cost);
+            log::info!(
+                "🛒 [{}] Buy Dip persist: novo base_price={:.2}, invested_amount={:.2}, buy_dip_buys_done += {}",
+                strategy.strategy_id, pos.entry_price, pos.total_cost, buy_dip_in_result
+            );
+        }
+    }
+
     for idx in &gradual_lot_indices_executed {
         update_set.insert(format!("{}.config.gradual_lots.{}.executed", p, idx), true);
         update_set.insert(format!("{}.config.gradual_lots.{}.executed_at", p, idx), now);
@@ -1318,6 +1479,7 @@ pub async fn process_active_strategies(db: &MongoDB) -> Result<ProcessResult, St
                 let user_id = user_doc.user_id.clone();
                 for strategy in &user_doc.strategies {
                     if !strategy.is_active { continue; }
+                    if strategy.deleted_at.is_some() { continue; }
                     match strategy.status {
                         StrategyStatus::Idle | StrategyStatus::Monitoring
                         | StrategyStatus::InPosition | StrategyStatus::GradualSelling => {}

@@ -38,7 +38,24 @@ async fn get_or_create_user_doc(db: &MongoDB, user_id: &str) -> Result<UserStrat
 pub async fn get_strategies(user: web::ReqData<Claims>, db: web::Data<MongoDB>) -> impl Responder {
     match get_or_create_user_doc(&db, &user.sub).await {
         Ok(user_doc) => {
-            let mut list: Vec<StrategyListItem> = user_doc.strategies.into_iter().map(StrategyListItem::from).collect();
+            let mut list: Vec<StrategyListItem> = user_doc.strategies.into_iter()
+                .filter(|s| s.deleted_at.is_none())
+                .map(StrategyListItem::from).collect();
+            list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            let total = list.len();
+            HttpResponse::Ok().json(serde_json::json!({ "success": true, "strategies": list, "total": total }))
+        }
+        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e })),
+    }
+}
+
+#[get("/history")]
+pub async fn get_strategies_history(user: web::ReqData<Claims>, db: web::Data<MongoDB>) -> impl Responder {
+    match get_or_create_user_doc(&db, &user.sub).await {
+        Ok(user_doc) => {
+            let mut list: Vec<StrategyListItem> = user_doc.strategies.into_iter()
+                .filter(|s| s.deleted_at.is_some())
+                .map(StrategyListItem::from).collect();
             list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             let total = list.len();
             HttpResponse::Ok().json(serde_json::json!({ "success": true, "strategies": list, "total": total }))
@@ -297,7 +314,7 @@ pub async fn create_strategy(user: web::ReqData<Claims>, body: web::Json<CreateS
         position: initial_position, executions: vec![], signals: vec![],
         last_checked_at: None, last_price: None, last_gradual_sell_at: None,
         error_message: None, total_pnl_usd: 0.0, total_executions: 0,
-        dca_buys_done: 0,
+        dca_buys_done: 0, buy_dip_buys_done: 0, deleted_at: None,
         started_at: now, created_at: now, updated_at: now,
     };
     let bson = match mongodb::bson::to_bson(&new_strategy) {
@@ -355,8 +372,21 @@ pub async fn delete_strategy(user: web::ReqData<Claims>, path: web::Path<String>
     let sid = path.into_inner();
     let collection = db.collection::<UserStrategies>(COLLECTION);
     let now = chrono::Utc::now().timestamp();
-    match collection.update_one(doc! { "user_id": &user.sub }, doc! { "$pull": { "strategies": { "strategy_id": &sid } }, "$set": { "updated_at": now } }).await {
-        Ok(r) if r.modified_count > 0 => HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": "Deleted" })),
+    let p = "strategies.$[elem]";
+    let af = doc! { "elem.strategy_id": &sid };
+    match collection.update_one(
+        doc! { "user_id": &user.sub },
+        doc! {
+            "$set": {
+                format!("{}.deleted_at", p): now,
+                format!("{}.is_active", p): false,
+                format!("{}.status", p): "archived",
+                format!("{}.updated_at", p): now,
+                "updated_at": now,
+            }
+        },
+    ).array_filters(vec![af]).await {
+        Ok(r) if r.modified_count > 0 => HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": "Archived" })),
         Ok(_) => HttpResponse::NotFound().json(serde_json::json!({ "success": false, "error": "Not found" })),
         Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": format!("Delete failed: {}", e) })),
     }

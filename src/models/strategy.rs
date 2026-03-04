@@ -88,12 +88,30 @@ pub struct StrategyConfig {
     /// Máximo de compras DCA extras (proteção contra queda infinita)
     #[serde(default = "default_dca_max")]
     pub dca_max_buys: i32,
+
+    // ── Auto Buy Dip ────────────────────────────────────────────────
+    /// Compra automática na queda. Funciona SEM posição aberta — monitora
+    /// o preço e compra quando cai `auto_buy_dip_percent`% do base_price.
+    /// Verifica saldo USDT antes de comprar.
+    #[serde(default)]
+    pub auto_buy_dip_enabled: bool,
+    /// Queda percentual do base_price para acionar compra (ex: 5.0 = -5%)
+    #[serde(default = "default_buy_dip_trigger")]
+    pub auto_buy_dip_percent: f64,
+    /// Valor em USDT de cada compra (ex: 50.0 = comprar $50)
+    #[serde(default)]
+    pub auto_buy_dip_amount_usd: f64,
+    /// Máximo de compras automáticas (proteção)
+    #[serde(default = "default_buy_dip_max")]
+    pub auto_buy_dip_max_buys: i32,
 }
 
 fn default_timer_gradual() -> i64 { 15 }
 fn default_time_execution() -> i64 { 120 }
 fn default_dca_trigger() -> f64 { 5.0 }
 fn default_dca_max() -> i32 { 3 }
+fn default_buy_dip_trigger() -> f64 { 5.0 }
+fn default_buy_dip_max() -> i32 { 3 }
 
 impl Default for StrategyConfig {
     fn default() -> Self {
@@ -113,6 +131,10 @@ impl Default for StrategyConfig {
             dca_buy_amount_usd: 0.0,
             dca_trigger_percent: 5.0,
             dca_max_buys: 3,
+            auto_buy_dip_enabled: false,
+            auto_buy_dip_percent: 5.0,
+            auto_buy_dip_amount_usd: 0.0,
+            auto_buy_dip_max_buys: 3,
         }
     }
 }
@@ -126,6 +148,11 @@ impl StrategyConfig {
 
     pub fn stop_loss_price(&self) -> f64 {
         self.base_price * (1.0 - self.stop_loss_percent / 100.0)
+    }
+
+    /// Preço que aciona auto-compra na queda. Ex: base_price $100, dip 5% → $95
+    pub fn buy_dip_trigger_price(&self) -> f64 {
+        self.base_price * (1.0 - self.auto_buy_dip_percent / 100.0)
     }
 
     pub fn gradual_trigger_price(&self, lot_index: usize) -> f64 {
@@ -207,6 +234,7 @@ pub enum SignalType {
     StopLoss,
     GradualSell,
     DcaBuy,
+    BuyDip,
     Expired,
     Info,
 }
@@ -218,6 +246,7 @@ impl std::fmt::Display for SignalType {
             SignalType::StopLoss => write!(f, "stop_loss"),
             SignalType::GradualSell => write!(f, "gradual_sell"),
             SignalType::DcaBuy => write!(f, "dca_buy"),
+            SignalType::BuyDip => write!(f, "buy_dip"),
             SignalType::Expired => write!(f, "expired"),
             SignalType::Info => write!(f, "info"),
         }
@@ -300,6 +329,9 @@ pub struct StrategyItem {
     /// Número de compras DCA já realizadas nesta estratégia.
     #[serde(default)]
     pub dca_buys_done: i32,
+    /// Número de compras "Buy the Dip" já realizadas.
+    #[serde(default)]
+    pub buy_dip_buys_done: i32,
     pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -367,6 +399,7 @@ pub struct StrategyResponse {
     pub total_pnl_usd: f64,
     pub total_executions: i32,
     pub dca_buys_done: i32,
+    pub buy_dip_buys_done: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<StrategyStatsResponse>,
     pub started_at: i64,
@@ -427,6 +460,7 @@ impl From<StrategyItem> for StrategyResponse {
             total_pnl_usd: item.total_pnl_usd,
             total_executions: item.total_executions,
             dca_buys_done: item.dca_buys_done,
+            buy_dip_buys_done: item.buy_dip_buys_done,
             stats: Some(stats),
             started_at: item.started_at,
             created_at: item.created_at,
@@ -452,6 +486,7 @@ pub struct StrategyListItem {
     pub total_pnl_usd: f64,
     pub total_executions: i32,
     pub dca_buys_done: i32,
+    pub buy_dip_buys_done: i32,
     pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -473,6 +508,7 @@ impl From<StrategyItem> for StrategyListItem {
             total_pnl_usd: item.total_pnl_usd,
             total_executions: item.total_executions,
             dca_buys_done: item.dca_buys_done,
+            buy_dip_buys_done: item.buy_dip_buys_done,
             started_at: item.started_at,
             created_at: item.created_at,
             updated_at: item.updated_at,

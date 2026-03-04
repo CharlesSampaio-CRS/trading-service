@@ -71,6 +71,75 @@ pub async fn fetch_orders_secure(
 }
 
 // ============================================================================
+// 📊 FETCH ORDERS PER EXCHANGE - Buscar ordens de UMA exchange específica
+// ============================================================================
+
+/// Request body para buscar orders de uma exchange específica
+#[derive(Debug, Deserialize)]
+pub struct FetchOrdersByExchangeRequest {
+    pub exchange_id: String,  // MongoDB ID da exchange
+}
+
+/// 🔒 POST /api/v1/orders/fetch/exchange
+/// Busca orders de UMA exchange específica usando JWT
+/// ⚡ Muito mais rápido que buscar de todas — ideal para modais
+pub async fn fetch_orders_by_exchange(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+    request: web::Json<FetchOrdersByExchangeRequest>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    let exchange_id = &request.exchange_id;
+    
+    log::info!("🔐⚡ Fetching orders for user {} from exchange {}", user_id, exchange_id);
+    
+    let start = std::time::Instant::now();
+    
+    // 1. Buscar exchanges do MongoDB (descriptografadas)
+    let exchanges = match crate::services::user_exchanges_service::get_user_exchanges_decrypted(&db, user_id).await {
+        Ok(exs) => exs,
+        Err(e) => {
+            log::error!("❌ Error fetching exchanges: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Error fetching exchanges: {}", e)
+            }));
+        }
+    };
+    
+    // 2. Filtrar apenas a exchange solicitada
+    let target_exchange = match exchanges.into_iter().find(|ex| ex.exchange_id == *exchange_id) {
+        Some(ex) => ex,
+        None => {
+            log::warn!("⚠️ Exchange {} not found for user {}", exchange_id, user_id);
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "error": format!("Exchange not found: {}", exchange_id)
+            }));
+        }
+    };
+    
+    let exchange_name = target_exchange.name.clone();
+    log::info!("⚡ Fetching orders only from {} ({})", exchange_name, target_exchange.ccxt_id);
+    
+    // 3. Buscar orders de apenas UMA exchange
+    match order_service::fetch_orders_from_exchanges(vec![target_exchange]).await {
+        Ok(response) => {
+            let elapsed = start.elapsed().as_millis();
+            log::info!("✅⚡ Fetched {} orders from {} in {}ms", response.count, exchange_name, elapsed);
+            HttpResponse::Ok().json(response)
+        }
+        Err(e) => {
+            log::error!("❌ Error fetching orders from {}: {}", exchange_name, e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": e
+            }))
+        }
+    }
+}
+
+// ============================================================================
 // ➕ CREATE ORDER - Criar nova ordem
 // ============================================================================
 

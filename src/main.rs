@@ -194,6 +194,7 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api/v1/strategies")
                     .wrap(middleware::auth::AuthMiddleware)
                     .service(api::strategies::get_strategies)
+                    .service(api::strategies::get_strategies_history)
                     .service(api::strategies::get_strategy_stats)
                     .service(api::strategies::get_strategy_executions)
                     .service(api::strategies::get_strategy_signals)

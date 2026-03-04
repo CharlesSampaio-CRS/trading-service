@@ -13,6 +13,7 @@ pub enum StrategyStatus {
     Expired,
     Paused,
     Error,
+    Archived,
 }
 
 impl Default for StrategyStatus {
@@ -31,6 +32,7 @@ impl std::fmt::Display for StrategyStatus {
             StrategyStatus::Expired => write!(f, "expired"),
             StrategyStatus::Paused => write!(f, "paused"),
             StrategyStatus::Error => write!(f, "error"),
+            StrategyStatus::Archived => write!(f, "archived"),
         }
     }
 }
@@ -332,6 +334,9 @@ pub struct StrategyItem {
     /// Número de compras "Buy the Dip" já realizadas.
     #[serde(default)]
     pub buy_dip_buys_done: i32,
+    /// Soft delete: se preenchido, estratégia foi arquivada (não aparece na lista ativa)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<i64>,
     pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -402,6 +407,8 @@ pub struct StrategyResponse {
     pub buy_dip_buys_done: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<StrategyStatsResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<i64>,
     pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -462,6 +469,7 @@ impl From<StrategyItem> for StrategyResponse {
             dca_buys_done: item.dca_buys_done,
             buy_dip_buys_done: item.buy_dip_buys_done,
             stats: Some(stats),
+            deleted_at: item.deleted_at,
             started_at: item.started_at,
             created_at: item.created_at,
             updated_at: item.updated_at,
@@ -487,6 +495,8 @@ pub struct StrategyListItem {
     pub total_executions: i32,
     pub dca_buys_done: i32,
     pub buy_dip_buys_done: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<i64>,
     pub started_at: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -509,6 +519,7 @@ impl From<StrategyItem> for StrategyListItem {
             total_executions: item.total_executions,
             dca_buys_done: item.dca_buys_done,
             buy_dip_buys_done: item.buy_dip_buys_done,
+            deleted_at: item.deleted_at,
             started_at: item.started_at,
             created_at: item.created_at,
             updated_at: item.updated_at,

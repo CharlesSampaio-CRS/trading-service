@@ -64,6 +64,15 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     let strategy_id = strategy.strategy_id.clone();
     let now = chrono::Utc::now().timestamp();
 
+    // ── Guard: archived/deleted strategy ──────────────────────────────
+    if strategy.deleted_at.is_some() {
+        return TickResult {
+            strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+            signals: vec![], executions: vec![], new_status: None,
+            error: Some(format!("Strategy '{}' is archived.", strategy.name)),
+        };
+    }
+
     // ── Guard: inactive strategy ────────────────────────────────────
     if !strategy.is_active {
         return TickResult {
@@ -1470,6 +1479,7 @@ pub async fn process_active_strategies(db: &MongoDB) -> Result<ProcessResult, St
                 let user_id = user_doc.user_id.clone();
                 for strategy in &user_doc.strategies {
                     if !strategy.is_active { continue; }
+                    if strategy.deleted_at.is_some() { continue; }
                     match strategy.status {
                         StrategyStatus::Idle | StrategyStatus::Monitoring
                         | StrategyStatus::InPosition | StrategyStatus::GradualSelling => {}

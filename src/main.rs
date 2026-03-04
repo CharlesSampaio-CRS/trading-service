@@ -246,8 +246,10 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::scope("/api/v1/orders")
                     .wrap(middleware::auth::AuthMiddleware)
-                    // 📊 Fetch orders from user's exchanges
+                    // 📊 Fetch orders from ALL user's exchanges
                     .route("/fetch/secure", web::post().to(api::orders::fetch_orders_secure))
+                    // ⚡ Fetch orders from ONE specific exchange (much faster)
+                    .route("/fetch/exchange", web::post().to(api::orders::fetch_orders_by_exchange))
                     // ➕ Create new order
                     .route("/create", web::post().to(api::orders::create_order_secure))
                     // ❌ Cancel existing order

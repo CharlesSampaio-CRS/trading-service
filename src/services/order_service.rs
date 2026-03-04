@@ -93,8 +93,13 @@ async fn fetch_exchange_orders(
     let ccxt_id_clone = ccxt_id.clone();
     let status = status_filter.to_string();
     
-    // Timeout de 10 segundos para cada exchange
-    let timeout_duration = std::time::Duration::from_secs(10);
+    // Timeout de 10 segundos para cada exchange (15s para MEXC que faz múltiplas chamadas)
+    let is_mexc = ccxt_id.to_lowercase() == "mexc";
+    let timeout_duration = if is_mexc {
+        std::time::Duration::from_secs(15)
+    } else {
+        std::time::Duration::from_secs(10)
+    };
     let exchange_name_for_timeout = exchange_name.clone();
     
     let task = tokio::task::spawn_blocking(move || {
@@ -116,8 +121,8 @@ async fn fetch_exchange_orders(
                     let mut all_orders = Vec::new();
                     let quote_currencies = vec!["USDT", "USDC", "BTC", "ETH", "BRL"];
                     // Base currencies comuns para buscar ordens de compra (ex: order buy BTC/USDT quando tem saldo USDT)
-                    let common_base_currencies = vec!["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "DOT", "MATIC"];
-                    let max_symbols = 30; // Aumentado para cobrir mais pares
+                    let common_base_currencies = vec!["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE"];
+                    let max_symbols = 15; // ⚡ OTIMIZADO: Reduzido de 30 para 15 — melhora latência ~50%
                     let mut symbols_checked = 0;
                     let mut checked_symbols_set: std::collections::HashSet<String> = std::collections::HashSet::new();
                     

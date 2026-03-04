@@ -256,7 +256,7 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     for signal in &mut signals {
         match signal.signal_type {
             SignalType::TakeProfit | SignalType::GradualSell => {
-                let sell_amount = calc_sell_amount(strategy, &signal.signal_type);
+                let mut sell_amount = calc_sell_amount(strategy, &signal.signal_type);
                 if sell_amount <= 0.0 { continue; }
 
                 // ── Double-check: se invested_amount preenchido, verificar lucro real ──
@@ -292,17 +292,26 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 if let Some(ref bals) = balances {
                     let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
                     if token_free < sell_amount * 0.95 { // 5% margem para arredondamento
-                        log::warn!(
-                            "⚠️ [{}] SALDO INSUFICIENTE para vender {:.6} {}! Saldo livre: {:.6}. Venda BLOQUEADA.",
-                            strategy.strategy_id, sell_amount, base_asset, token_free
-                        );
-                        signal.acted = false;
-                        signal.message = format!(
-                            "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas só tem {:.6} disponível na exchange. Verifique seu saldo.",
-                            sell_amount, base_asset, token_free
-                        );
-                        signal.signal_type = SignalType::Info;
-                        continue;
+                        if token_free > 0.0 {
+                            // Saldo parcial: vende o que tem disponível
+                            log::warn!(
+                                "⚠️ [{}] Saldo parcial para vender: precisa {:.6} {} mas tem {:.6}. Vendendo saldo disponível.",
+                                strategy.strategy_id, sell_amount, base_asset, token_free
+                            );
+                            sell_amount = token_free;
+                        } else {
+                            log::warn!(
+                                "⚠️ [{}] SALDO ZERO para vender {:.6} {}! Venda BLOQUEADA.",
+                                strategy.strategy_id, sell_amount, base_asset
+                            );
+                            signal.acted = false;
+                            signal.message = format!(
+                                "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas não tem saldo disponível na exchange. Verifique seu saldo.",
+                                sell_amount, base_asset
+                            );
+                            signal.signal_type = SignalType::Info;
+                            continue;
+                        }
                     }
                 }
 
@@ -370,24 +379,33 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     );
                     // Será tratado no bloco DcaBuy abaixo
                 } else {
-                    let qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
+                    let mut qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
                     if qty <= 0.0 { continue; }
 
                     // ── Balance check: verificar saldo do token para stop loss ──
                     if let Some(ref bals) = balances {
                         let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
                         if token_free < qty * 0.95 {
-                            log::warn!(
-                                "⚠️ [{}] SALDO INSUFICIENTE para stop loss! Precisa: {:.6} {}, Disponível: {:.6}.",
-                                strategy.strategy_id, qty, base_asset, token_free
-                            );
-                            signal.acted = false;
-                            signal.message = format!(
-                                "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas só tem {:.6}. Verifique seu saldo na exchange.",
-                                qty, base_asset, token_free
-                            );
-                            signal.signal_type = SignalType::Info;
-                            continue;
+                            if token_free > 0.0 {
+                                // Saldo parcial: vende o que tem disponível
+                                log::warn!(
+                                    "⚠️ [{}] Saldo parcial para stop loss: precisa {:.6} {} mas tem {:.6}. Vendendo saldo disponível.",
+                                    strategy.strategy_id, qty, base_asset, token_free
+                                );
+                                qty = token_free;
+                            } else {
+                                log::warn!(
+                                    "⚠️ [{}] SALDO ZERO para stop loss! Precisa: {:.6} {}. Venda BLOQUEADA.",
+                                    strategy.strategy_id, qty, base_asset
+                                );
+                                signal.acted = false;
+                                signal.message = format!(
+                                    "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas não tem saldo. Verifique seu saldo na exchange.",
+                                    qty, base_asset
+                                );
+                                signal.signal_type = SignalType::Info;
+                                continue;
+                            }
                         }
                     }
 

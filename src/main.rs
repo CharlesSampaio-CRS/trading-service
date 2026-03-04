@@ -227,11 +227,16 @@ async fn main() -> std::io::Result<()> {
                     .route("/summary", web::get().to(api::balances::get_balance_summary))
                     .route("/exchange/{id}", web::get().to(api::balances::get_exchange_balance))
                     .route("/market-movers", web::get().to(api::balances::get_market_movers))
-                    // Protected endpoint requiring JWT authentication
+                    // Protected endpoints requiring JWT authentication
                     .service(
                         web::resource("/secure")
                             .wrap(middleware::auth::AuthMiddleware)
                             .route(web::post().to(api::balances::post_balances_secure))
+                    )
+                    .service(
+                        web::resource("/cached")
+                            .wrap(middleware::auth::AuthMiddleware)
+                            .route(web::post().to(api::balances::get_balances_cached))
                     )
             )
             

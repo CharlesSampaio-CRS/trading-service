@@ -1,6 +1,7 @@
 use actix_web::{web, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use crate::{database::MongoDB, services::balance_service, middleware::auth::Claims};
+use mongodb::bson::doc;
 
 #[derive(Debug, Deserialize)]
 pub struct BalanceQuery {
@@ -96,6 +97,7 @@ pub async fn post_balances(
 // /api/v1/balances/secure (POST) - ✅ SECURE VERSION - Fetch balances from MongoDB using JWT
 /// New secure endpoint that uses JWT to identify user and fetches credentials from MongoDB
 /// Body is EMPTY - user identification comes from JWT token
+/// 🚀 OTIMIZAÇÃO: Salva resultado em balance_cache para servir em /balances/cached
 pub async fn post_balances_secure(
     user: web::ReqData<Claims>,
     db: web::Data<MongoDB>,
@@ -112,7 +114,8 @@ pub async fn post_balances_secure(
                 return HttpResponse::Ok().json(serde_json::json!({
                     "success": true,
                     "total_usd": 0.0,
-                    "exchanges": []
+                    "exchanges": [],
+                    "timestamp": chrono::Utc::now().timestamp()
                 }));
             }
             
@@ -122,6 +125,17 @@ pub async fn post_balances_secure(
             match balance_service::fetch_balances_from_exchanges(exchanges).await {
                 Ok(response) => {
                     log::info!("✅ Balances fetched: {} exchanges", response.exchanges.len());
+                    
+                    // 🚀 SAVE TO CACHE: Salva resposta completa em balance_cache (fire-and-forget)
+                    let db_clone = db.clone();
+                    let user_id_clone = user_id.to_string();
+                    let response_json = serde_json::to_value(&response).unwrap_or_default();
+                    tokio::spawn(async move {
+                        if let Err(e) = save_balance_cache(&db_clone, &user_id_clone, &response_json).await {
+                            log::warn!("⚠️ Failed to save balance cache: {}", e);
+                        }
+                    });
+                    
                     HttpResponse::Ok().json(response)
                 }
                 Err(e) => {
@@ -141,6 +155,99 @@ pub async fn post_balances_secure(
             }))
         }
     }
+}
+
+// ==================== 🚀 BALANCE CACHE (Stale-While-Revalidate) ====================
+
+/// POST /api/v1/balances/cached - Retorna o último balance cacheado do MongoDB
+/// Resposta instantânea (<100ms) - Sem chamar CCXT
+/// O frontend usa isso para exibir dados imediatamente e depois chama /secure em background
+pub async fn get_balances_cached(
+    user: web::ReqData<Claims>,
+    db: web::Data<MongoDB>,
+) -> impl Responder {
+    let user_id = &user.sub;
+    
+    log::info!("⚡ POST /balances/cached - user {} (instant cache)", user_id);
+    
+    let collection = db.collection::<mongodb::bson::Document>("balance_cache");
+    
+    let filter = doc! { "user_id": user_id.as_str() };
+    
+    match collection.find_one(filter).await {
+        Ok(Some(cached_doc)) => {
+            // Extrai o timestamp do cache para o frontend saber quão "stale" é
+            let cached_at = cached_doc.get_i64("cached_at").unwrap_or(0);
+            let age_seconds = chrono::Utc::now().timestamp() - cached_at;
+            
+            log::info!("✅ Cache hit for user {} (age: {}s)", user_id, age_seconds);
+            
+            // Retorna os dados cacheados com metadata
+            let cached_data = cached_doc.get_document("data").cloned().unwrap_or_default();
+            
+            HttpResponse::Ok().json(serde_json::json!({
+                "from_cache": true,
+                "cached_at": cached_at,
+                "age_seconds": age_seconds,
+                "data": mongodb::bson::from_document::<serde_json::Value>(cached_data).unwrap_or_default()
+            }))
+        }
+        Ok(None) => {
+            log::info!("📭 No cache found for user {}", user_id);
+            HttpResponse::Ok().json(serde_json::json!({
+                "from_cache": true,
+                "cached_at": null,
+                "age_seconds": null,
+                "data": null
+            }))
+        }
+        Err(e) => {
+            log::error!("❌ Error reading balance cache: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "error": format!("Cache read error: {}", e)
+            }))
+        }
+    }
+}
+
+/// Salva a resposta de balance no MongoDB como cache
+/// Collection: balance_cache (1 documento por user_id, upsert)
+async fn save_balance_cache(
+    db: &MongoDB,
+    user_id: &str,
+    response_data: &serde_json::Value,
+) -> Result<(), String> {
+    let collection = db.collection::<mongodb::bson::Document>("balance_cache");
+    
+    let now = chrono::Utc::now().timestamp();
+    
+    // Converte serde_json::Value para BSON Document
+    let bson_data = mongodb::bson::to_document(response_data)
+        .map_err(|e| format!("BSON conversion error: {}", e))?;
+    
+    let filter = doc! { "user_id": user_id };
+    let update = doc! {
+        "$set": {
+            "user_id": user_id,
+            "data": bson_data,
+            "cached_at": now,
+            "updated_at": mongodb::bson::DateTime::now(),
+        }
+    };
+    
+    let options = mongodb::options::UpdateOptions::builder()
+        .upsert(true)
+        .build();
+    
+    collection
+        .update_one(filter, update)
+        .with_options(options)
+        .await
+        .map_err(|e| format!("Failed to save balance cache: {}", e))?;
+    
+    log::info!("💾 Balance cache saved for user {} at {}", user_id, now);
+    Ok(())
 }
 
 // GET /api/v1/balances/summary - Fast summary from CCXT

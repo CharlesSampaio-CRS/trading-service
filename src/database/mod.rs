@@ -117,6 +117,23 @@ impl MongoDB {
             Err(e) => log::debug!("   ℹ️  Index already exists: {}", e),
         }
         
+        // 🚀 Index for balance_cache: (user_id) unique - Stale-While-Revalidate cache
+        let balance_cache = self.database().collection::<mongodb::bson::Document>("balance_cache");
+        
+        let balance_cache_index = IndexModel::builder()
+            .keys(doc! { "user_id": 1 })
+            .options(
+                mongodb::options::IndexOptions::builder()
+                    .unique(true)
+                    .build()
+            )
+            .build();
+        
+        match balance_cache.create_index(balance_cache_index).await {
+            Ok(_) => log::info!("   ✅ Index created: balance_cache(user_id) [unique]"),
+            Err(e) => log::debug!("   ℹ️  Index already exists: {}", e),
+        }
+        
         log::info!("✅ Database indexes ready");
         
         Ok(())

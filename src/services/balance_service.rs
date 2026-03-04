@@ -342,12 +342,12 @@ async fn fetch_exchange_balance_with_retry(exchange: DecryptedExchange, max_retr
             Ok(Ok(result)) => result,
             Ok(Err(e)) => return Err(format!("Task error: {}", e)),
             Err(_) => {
-                log::warn!("⏱️ Timeout fetching balance from {} after 60s", exchange_name);
+                log::warn!("⏱️ Timeout fetching balance from {} after {:?}", exchange_name, timeout_duration);
                 return Ok(ExchangeBalance {
                     exchange: exchange_name.clone(),
                     exchange_id: exchange_id.clone(),
                     success: false,
-                    error: Some("Request timeout after 60s".to_string()),
+                    error: Some(format!("Request timeout after {:?}", timeout_duration)),
                     balances: HashMap::new(),
                     total_usd: 0.0,
                 });

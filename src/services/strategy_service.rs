@@ -360,27 +360,48 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 // ── Balance check: verificar se tem saldo suficiente do token para vender ──
                 // IMPORTANTE: Sempre usar o saldo REAL da exchange ao invés de position.quantity,
                 // porque fees da compra fazem o saldo real ser ligeiramente menor que o estimado.
+                // NOTA: `free` = disponível, `total` = livre + travado em ordens abertas.
+                // Se free=0 mas total>0, o token está travado numa ordem aberta → mensagem específica.
                 if let Some(ref bals) = balances {
-                    let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
-                    if token_free <= 0.0 {
+                    let token_free  = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                    let token_total = bals.get(&base_asset).map(|b| b.total).unwrap_or(0.0);
+
+                    if token_total <= 0.0 {
+                        // Realmente não tem o token na exchange
                         log::warn!(
                             "⚠️ [{}] SALDO ZERO para vender {:.6} {}! Venda BLOQUEADA.",
                             strategy.strategy_id, sell_amount, base_asset
                         );
                         signal.acted = false;
                         signal.message = format!(
-                            "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas não tem saldo disponível na exchange. Verifique seu saldo.",
-                            sell_amount, base_asset
+                            "⚠️ Saldo zerado! Não há {} na exchange. Verifique se os tokens ainda estão na sua conta.",
+                            base_asset
                         );
                         signal.signal_type = SignalType::Info;
                         continue;
                     }
+
+                    if token_free <= 0.0 && token_total > 0.0 {
+                        // Token existe mas está 100% travado em ordem(s) aberta(s)
+                        log::warn!(
+                            "⚠️ [{}] {} travado em ordens abertas: total={:.6}, free=0. Venda BLOQUEADA.",
+                            strategy.strategy_id, base_asset, token_total
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ {} está travado em ordens abertas ({:.6} total, 0 livre). Cancele as ordens abertas de {} na exchange e tente novamente.",
+                            base_asset, token_total, base_asset
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
+
                     if token_free < sell_amount {
-                        // Saldo real é menor que position.quantity (normal por causa de fees da compra)
+                        // Saldo free é menor que position.quantity (normal por causa de fees da compra)
                         // Usa o saldo real da exchange para evitar "insufficient balance"
                         log::warn!(
-                            "⚠️ [{}] Ajustando sell_amount: position.qty={:.6} mas saldo real={:.6} {}. Usando saldo real.",
-                            strategy.strategy_id, sell_amount, token_free, base_asset
+                            "⚠️ [{}] Ajustando sell_amount: position.qty={:.6} mas saldo livre={:.6} {} (total={:.6}). Usando saldo livre.",
+                            strategy.strategy_id, sell_amount, token_free, base_asset, token_total
                         );
                         sell_amount = token_free;
                     }
@@ -456,25 +477,42 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     // ── Balance check: verificar saldo do token para stop loss ──
                     // IMPORTANTE: Sempre usar saldo REAL da exchange (fees da compra reduzem o saldo)
                     if let Some(ref bals) = balances {
-                        let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
-                        if token_free <= 0.0 {
+                        let token_free  = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                        let token_total = bals.get(&base_asset).map(|b| b.total).unwrap_or(0.0);
+
+                        if token_total <= 0.0 {
                             log::warn!(
                                 "⚠️ [{}] SALDO ZERO para stop loss! Precisa: {:.6} {}. Venda BLOQUEADA.",
                                 strategy.strategy_id, qty, base_asset
                             );
                             signal.acted = false;
                             signal.message = format!(
-                                "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas não tem saldo. Verifique seu saldo na exchange.",
-                                qty, base_asset
+                                "⚠️ Stop loss bloqueado: não há {} na exchange. Verifique se os tokens ainda estão na sua conta.",
+                                base_asset
                             );
                             signal.signal_type = SignalType::Info;
                             continue;
                         }
-                        if token_free < qty {
-                            // Saldo real é menor que position.quantity (normal por causa de fees)
+
+                        if token_free <= 0.0 && token_total > 0.0 {
                             log::warn!(
-                                "⚠️ [{}] Ajustando stop loss qty: position.qty={:.6} mas saldo real={:.6} {}. Usando saldo real.",
-                                strategy.strategy_id, qty, token_free, base_asset
+                                "⚠️ [{}] Stop loss: {} travado em ordens abertas ({:.6} total, 0 livre). Venda BLOQUEADA.",
+                                strategy.strategy_id, base_asset, token_total
+                            );
+                            signal.acted = false;
+                            signal.message = format!(
+                                "⚠️ Stop loss bloqueado: {} está travado em ordens abertas ({:.6} total, 0 livre). Cancele as ordens abertas e tente novamente.",
+                                base_asset, token_total
+                            );
+                            signal.signal_type = SignalType::Info;
+                            continue;
+                        }
+
+                        if token_free < qty {
+                            // Saldo free é menor que position.quantity (normal por causa de fees)
+                            log::warn!(
+                                "⚠️ [{}] Ajustando stop loss qty: position.qty={:.6} mas saldo livre={:.6} {} (total={:.6}). Usando saldo livre.",
+                                strategy.strategy_id, qty, token_free, base_asset, token_total
                             );
                             qty = token_free;
                         }

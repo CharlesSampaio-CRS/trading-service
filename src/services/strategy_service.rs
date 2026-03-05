@@ -1517,11 +1517,64 @@ pub async fn process_active_strategies(db: &MongoDB) -> Result<ProcessResult, St
                     }
                     total += 1;
                     let last_checked = strategy.last_checked_at.unwrap_or(0);
-                    if now - last_checked < 30 { continue; }
+                    let elapsed_since_check = now - last_checked;
+                    if elapsed_since_check < 30 { continue; }
+
+                    // ── Log antes de tickar: mostra o que vai ser verificado ──
+                    let last_price_str = strategy.last_price
+                        .map(|p| format!("{:.4}", p))
+                        .unwrap_or_else(|| "?".to_string());
+                    let config = &strategy.config;
+                    let trigger_str = format!("{:.4}", config.trigger_price());
+                    let pnl_str = if let Some(pos) = &strategy.position {
+                        if pos.entry_price > 0.0 {
+                            let pct = ((strategy.last_price.unwrap_or(0.0) - pos.entry_price) / pos.entry_price) * 100.0;
+                            format!(" | PnL: {:+.2}%", pct)
+                        } else { String::new() }
+                    } else { String::new() };
+                    let consecutive_fails = strategy.executions.iter().rev()
+                        .take_while(|e| matches!(e.action, ExecutionAction::SellFailed | ExecutionAction::BuyFailed))
+                        .count();
+                    let fail_warn = if consecutive_fails > 0 {
+                        format!(" | ⚠️ {} falha(s) consecutiva(s)", consecutive_fails)
+                    } else { String::new() };
+
+                    log::info!(
+                        "🔍 [{} | {}] {} | status: {} | preço: {} | TP: {}{}{}",
+                        &strategy.strategy_id[..8.min(strategy.strategy_id.len())],
+                        strategy.exchange_name,
+                        strategy.symbol,
+                        strategy.status,
+                        last_price_str,
+                        trigger_str,
+                        pnl_str,
+                        fail_warn
+                    );
 
                     let tick_result = tick(db, &user_id, strategy).await;
                     signals_generated += tick_result.signals.len();
                     orders_executed += tick_result.executions.len();
+
+                    // ── Log pós-tick: resultado ──
+                    for sig in &tick_result.signals {
+                        if !matches!(sig.signal_type, SignalType::Info) || sig.acted {
+                            log::info!(
+                                "   ↳ [{:?}{}] {}",
+                                sig.signal_type,
+                                if sig.acted { " ✅" } else { "" },
+                                &sig.message[..sig.message.len().min(120)]
+                            );
+                        }
+                    }
+                    for exec in &tick_result.executions {
+                        log::info!(
+                            "   💰 [{:?}] {:.6} {} @ {:.4} | PnL: ${:.2}",
+                            exec.action, exec.amount, strategy.symbol, exec.price, exec.pnl_usd
+                        );
+                    }
+                    if let Some(ref err) = tick_result.error {
+                        log::warn!("   ⚠️ tick error: {}", err);
+                    }
 
                     match persist_tick_result(db, &user_id, strategy, &tick_result, false).await {
                         Ok(_) => processed += 1,

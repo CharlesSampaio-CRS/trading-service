@@ -1,6 +1,105 @@
 use serde::{Deserialize, Serialize};
 use mongodb::bson::oid::ObjectId;
 
+/// Deserializador flexível de timestamps: aceita i64 (unix segundos),
+/// BSON DateTime ({ "$date": ms }) ou string numérica.
+/// Necessário pois scripts externos (Python) podem gravar datas como
+/// objetos DateTime enquanto o código Rust usa timestamps Unix (i64).
+mod ts_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::de::{self, Visitor, MapAccess};
+    use std::fmt;
+
+    struct TsVisitor;
+    impl<'de> Visitor<'de> for TsVisitor {
+        type Value = i64;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "i64 timestamp (segundos) ou BSON DateTime")
+        }
+        fn visit_i8<E: de::Error>(self, v: i8)   -> Result<i64, E> { Ok(v as i64) }
+        fn visit_i16<E: de::Error>(self, v: i16) -> Result<i64, E> { Ok(v as i64) }
+        fn visit_i32<E: de::Error>(self, v: i32) -> Result<i64, E> { Ok(v as i64) }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> { Ok(v) }
+        fn visit_u8<E: de::Error>(self, v: u8)   -> Result<i64, E> { Ok(v as i64) }
+        fn visit_u16<E: de::Error>(self, v: u16) -> Result<i64, E> { Ok(v as i64) }
+        fn visit_u32<E: de::Error>(self, v: u32) -> Result<i64, E> { Ok(v as i64) }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> { Ok(v as i64) }
+        fn visit_f32<E: de::Error>(self, v: f32) -> Result<i64, E> { Ok(v as i64) }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> { Ok(v as i64) }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
+            v.parse::<i64>().map_err(de::Error::custom)
+        }
+        /// BSON DateTime chega como mapa: { "$date": { "$numberLong": "ms" } }
+        ///                            ou: { "$date": ms_int }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<i64, A::Error> {
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum DateVal {
+                Int(i64),
+                UInt(u64),
+                Str(String),
+                NumberLong { #[serde(rename = "$numberLong")] n: String },
+            }
+            let mut ms: Option<i64> = None;
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "$date" {
+                    let val = map.next_value::<DateVal>()?;
+                    ms = Some(match val {
+                        DateVal::Int(v)  => v,
+                        DateVal::UInt(v) => v as i64,
+                        DateVal::Str(s)  => s.parse().map_err(de::Error::custom)?,
+                        DateVal::NumberLong { n } => n.parse().map_err(de::Error::custom)?,
+                    });
+                } else {
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+            // BSON DateTime está em milissegundos; converter para segundos Unix
+            ms.map(|v| v / 1000).ok_or_else(|| de::Error::missing_field("$date"))
+        }
+    }
+
+    pub fn serialize<S: Serializer>(ts: &i64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_i64(*ts)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+        d.deserialize_any(TsVisitor)
+    }
+
+    pub mod opt {
+        use serde::{Deserializer, Serializer};
+        use serde::de::{self, Visitor};
+        use std::fmt;
+
+        struct OptTsVisitor;
+        impl<'de> Visitor<'de> for OptTsVisitor {
+            type Value = Option<i64>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "optional i64 timestamp ou BSON DateTime")
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Option<i64>, E> { Ok(None) }
+            fn visit_unit<E: de::Error>(self) -> Result<Option<i64>, E> { Ok(None) }
+            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Option<i64>, D2::Error> {
+                super::deserialize(d).map(Some)
+            }
+            // Valores diretos (quando o Option é armazenado sem wrapper Some)
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Option<i64>, E> { Ok(Some(v)) }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Option<i64>, E> { Ok(Some(v as i64)) }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Option<i64>, E> { Ok(Some(v as i64)) }
+            fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<Option<i64>, A::Error> {
+                super::TsVisitor.visit_map(map).map(Some)
+            }
+        }
+
+        pub fn serialize<S: Serializer>(ts: &Option<i64>, s: S) -> Result<S::Ok, S::Error> {
+            match ts { Some(v) => s.serialize_some(v), None => s.serialize_none() }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+            d.deserialize_option(OptTsVisitor)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum StrategyStatus {
@@ -43,7 +142,7 @@ pub struct GradualLot {
     pub sell_percent: f64,
     #[serde(default)]
     pub executed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub executed_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_price: Option<f64>,
@@ -259,6 +358,7 @@ pub struct StrategyExecution {
     pub pnl_usd: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exchange_order_id: Option<String>,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub executed_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
@@ -302,6 +402,7 @@ pub struct StrategySignal {
     pub acted: bool,
     #[serde(default)]
     pub price_change_percent: f64,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub created_at: i64,
     /// "system" (monitor automático) ou "user" (tick manual). Preenchido no persist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -321,6 +422,7 @@ pub struct PositionInfo {
     pub unrealized_pnl_percent: f64,
     #[serde(default)]
     pub highest_price: f64,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub opened_at: i64,
 }
 
@@ -331,7 +433,9 @@ pub struct UserStrategies {
     pub user_id: String,
     #[serde(default)]
     pub strategies: Vec<StrategyItem>,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub created_at: i64,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub updated_at: i64,
 }
 
@@ -354,11 +458,11 @@ pub struct StrategyItem {
     pub executions: Vec<StrategyExecution>,
     #[serde(default)]
     pub signals: Vec<StrategySignal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub last_checked_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_price: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub last_gradual_sell_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
@@ -373,10 +477,13 @@ pub struct StrategyItem {
     #[serde(default)]
     pub buy_dip_buys_done: i32,
     /// Soft delete: se preenchido, estratégia foi arquivada (não aparece na lista ativa)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub deleted_at: Option<i64>,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub started_at: i64,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub created_at: i64,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub updated_at: i64,
 }
 
@@ -433,7 +540,7 @@ pub struct StrategyResponse {
     pub position: Option<PositionInfo>,
     pub executions: Vec<StrategyExecution>,
     pub signals: Vec<StrategySignal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub last_checked_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_price: Option<f64>,
@@ -445,10 +552,13 @@ pub struct StrategyResponse {
     pub buy_dip_buys_done: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<StrategyStatsResponse>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub deleted_at: Option<i64>,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub started_at: i64,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub created_at: i64,
+    #[serde(deserialize_with = "ts_serde::deserialize")]
     pub updated_at: i64,
 }
 

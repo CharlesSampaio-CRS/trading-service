@@ -334,14 +334,15 @@ pub async fn update_strategy(user: web::ReqData<Claims>, path: web::Path<String>
     let user_id = &user.sub;
     let sid = path.into_inner();
     let collection = db.collection::<UserStrategies>(COLLECTION);
-    match get_or_create_user_doc(&db, user_id).await {
+    let found_strategy: Option<StrategyItem> = match get_or_create_user_doc(&db, user_id).await {
         Ok(ud) => {
-            if !ud.strategies.iter().any(|s| s.strategy_id == sid) {
-                return HttpResponse::NotFound().json(serde_json::json!({ "success": false, "error": "Strategy not found" }));
+            match ud.strategies.into_iter().find(|s| s.strategy_id == sid) {
+                Some(s) => Some(s),
+                None => return HttpResponse::NotFound().json(serde_json::json!({ "success": false, "error": "Strategy not found" })),
             }
         }
         Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({ "success": false, "error": e })),
-    }
+    };
     let now = chrono::Utc::now().timestamp();
     let p = "strategies.$[elem]";
     let mut udoc = doc! { format!("{}.updated_at", p): now, "updated_at": now };
@@ -351,7 +352,22 @@ pub async fn update_strategy(user: web::ReqData<Claims>, path: web::Path<String>
     if let Some(v) = &body.exchange_name { udoc.insert(format!("{}.exchange_name", p), v); }
     if let Some(active) = body.is_active {
         udoc.insert(format!("{}.is_active", p), active);
-        udoc.insert(format!("{}.status", p), if active { "monitoring" } else { "paused" });
+        if !active {
+            udoc.insert(format!("{}.status", p), "paused");
+        } else {
+            // Preserve in_position/gradual_selling status when reactivating if position exists
+            let has_position = found_strategy.as_ref().map_or(false, |s| s.position.is_some());
+            if has_position {
+                let prev_status = &found_strategy.as_ref().unwrap().status;
+                let restore_to = match prev_status {
+                    StrategyStatus::GradualSelling => "gradual_selling",
+                    _ => "in_position",
+                };
+                udoc.insert(format!("{}.status", p), restore_to);
+            } else {
+                udoc.insert(format!("{}.status", p), "monitoring");
+            }
+        }
     }
     if let Some(cfg) = &body.config { udoc.insert(format!("{}.config", p), mongodb::bson::to_bson(cfg).unwrap()); }
     let af = doc! { "elem.strategy_id": &sid };

@@ -133,6 +133,34 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
         };
     }
 
+    // ── Guard: consecutive sell/buy failures ─────────────────────────
+    // If last 5 executions are all sell_failed or buy_failed, pause the strategy
+    // to avoid spamming the exchange with failing orders every 30 seconds.
+    const MAX_CONSECUTIVE_FAILURES: usize = 5;
+    let recent_execs: Vec<_> = strategy.executions.iter().rev().take(MAX_CONSECUTIVE_FAILURES).collect();
+    if recent_execs.len() == MAX_CONSECUTIVE_FAILURES
+        && recent_execs.iter().all(|e| matches!(e.action, ExecutionAction::SellFailed | ExecutionAction::BuyFailed))
+    {
+        let last_err = recent_execs.first().and_then(|e| e.error_message.as_deref()).unwrap_or("unknown");
+        log::warn!(
+            "🛑 [{}] {} consecutive order failures detected. Pausing strategy. Last error: {}",
+            strategy_id, MAX_CONSECUTIVE_FAILURES, last_err
+        );
+        return TickResult {
+            strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+            signals: vec![StrategySignal {
+                signal_type: SignalType::Info, price: 0.0,
+                message: format!(
+                    "🛑 Strategy paused after {} consecutive order failures. Last error: {}. Please check your exchange balance and reactivate.",
+                    MAX_CONSECUTIVE_FAILURES, last_err
+                ),
+                acted: false, price_change_percent: 0.0, created_at: now, source: None,
+            }],
+            executions: vec![], new_status: Some(StrategyStatus::Error),
+            error: Some(format!("Auto-paused: {} consecutive order failures. Last: {}", MAX_CONSECUTIVE_FAILURES, last_err)),
+        };
+    }
+
     // ── Guard: expiration ───────────────────────────────────────────
     if strategy.is_expired() {
         let elapsed_min = (now - strategy.started_at) / 60;

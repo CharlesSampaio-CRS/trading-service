@@ -237,10 +237,17 @@ impl CCXTClient {
                                         merged_total.set_item(&symbol, existing + amount).ok();
                                         
                                         // Free
+                                        // Helper: extrai f64 tolerando float OU string (MEXC retorna strings às vezes)
+                                        let extract_f64 = |v: &pyo3::PyAny| -> f64 {
+                                            v.extract::<f64>().ok()
+                                                .or_else(|| v.extract::<String>().ok().and_then(|s| s.parse().ok()))
+                                                .unwrap_or(0.0)
+                                        };
+
                                         let free_amt: f64 = w_free
                                             .and_then(|f| f.downcast::<PyDict>().ok())
                                             .and_then(|d| d.get_item(&symbol).ok())
-                                            .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                            .and_then(|opt| opt.map(|v| extract_f64(v)))
                                             .unwrap_or(0.0);
                                         let existing_free: f64 = merged_free
                                             .get_item(&symbol).ok()
@@ -252,13 +259,18 @@ impl CCXTClient {
                                         let used_amt: f64 = w_used
                                             .and_then(|u| u.downcast::<PyDict>().ok())
                                             .and_then(|d| d.get_item(&symbol).ok())
-                                            .and_then(|opt| opt.and_then(|v| v.extract().ok()))
+                                            .and_then(|opt| opt.map(|v| extract_f64(v)))
                                             .unwrap_or(0.0);
                                         let existing_used: f64 = merged_used
                                             .get_item(&symbol).ok()
                                             .and_then(|opt| opt.and_then(|v| v.extract().ok()))
                                             .unwrap_or(0.0);
                                         merged_used.set_item(&symbol, existing_used + used_amt).ok();
+
+                                        if free_amt == 0.0 && amount > 0.001 {
+                                            log::debug!("🔍 [{}] {} free=0 total={:.6} used={:.6} (wallet: {})",
+                                                exchange_name, symbol, amount, used_amt, wallet_type);
+                                        }
                                         
                                         if *wallet_type != "spot" && amount > 0.001 {
                                             log::info!("🏦 [{}] {} wallet: {} = {:.6} (merged total: {:.6})", 

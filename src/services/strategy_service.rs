@@ -1542,7 +1542,9 @@ pub async fn process_active_strategies(db: &MongoDB) -> Result<ProcessResult, St
                     total += 1;
                     let last_checked = strategy.last_checked_at.unwrap_or(0);
                     let elapsed_since_check = now - last_checked;
-                    if elapsed_since_check < 30 { continue; }
+                    // Use 25s threshold (slightly less than 30s interval) to avoid
+                    // strategies being skipped due to minor timing drift
+                    if elapsed_since_check < 25 { continue; }
 
                     // ── Log antes de tickar: mostra o que vai ser verificado ──
                     let last_price_str = strategy.last_price

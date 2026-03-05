@@ -684,7 +684,7 @@ fn evaluate_trigger(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
             signals.push(StrategySignal {
                 signal_type: SignalType::Info, price,
                 message: format!(
-                    "👁️ Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger {:.2}.{}{}",
+                    "Monitorando: preço {:.2} ({:+.2}% do base). Faltam {:.2} ({:.2}%) para trigger {:.2}.{}{}",
                     price, pct, diff_trigger, diff_trigger_pct, trigger,
                     if config.stop_loss_enabled {
                         format!(" Margem até stop: {:.2} ({:.2}%) acima de {:.2}.", diff_sl, diff_sl_pct, sl_price)

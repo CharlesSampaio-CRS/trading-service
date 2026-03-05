@@ -1391,8 +1391,20 @@ pub async fn activate_strategy(db: &MongoDB, strategy_id: &str, user_id: &str) -
         .find(|s| s.strategy_id == strategy_id)
         .ok_or_else(|| "Strategy not found. It may have been deleted.".to_string())?;
 
-    if strategy.is_active && strategy.status == StrategyStatus::Monitoring {
-        return Err(format!("Strategy '{}' is already active and monitoring.", strategy.name));
+    // Se já está ativa em estado operacional (monitoring, in_position, gradual_selling),
+    // não precisa reativar — retorna a estratégia como está sem erro.
+    if strategy.is_active {
+        match strategy.status {
+            StrategyStatus::Monitoring | StrategyStatus::InPosition | StrategyStatus::GradualSelling => {
+                let user_doc2 = collection.find_one(doc! { "user_id": user_id }).await
+                    .map_err(|e| format!("Failed to fetch strategy: {}", e))?
+                    .ok_or_else(|| "Strategy not found.".to_string())?;
+                return user_doc2.strategies.into_iter()
+                    .find(|s| s.strategy_id == strategy_id)
+                    .ok_or_else(|| "Strategy not found.".to_string());
+            }
+            _ => {}
+        }
     }
 
     if strategy.config.base_price <= 0.0 {
@@ -1402,15 +1414,27 @@ pub async fn activate_strategy(db: &MongoDB, strategy_id: &str, user_id: &str) -
     let now = chrono::Utc::now().timestamp();
     let p = "strategies.$[elem]";
 
-    log::info!("▶️ Activating strategy '{}' ({}) for user {} — resetting started_at for new expiration cycle", strategy.name, strategy_id, user_id);
+    // Determinar status correto ao ativar:
+    // - Se tem posição aberta → volta para in_position (preserva posição)
+    // - Caso contrário → monitoring (aguarda entrada)
+    let restore_status = if strategy.position.is_some() {
+        match strategy.status {
+            StrategyStatus::GradualSelling => "gradual_selling",
+            _ => "in_position",
+        }
+    } else {
+        "monitoring"
+    };
 
-    // Reset started_at so the expiration timer starts fresh.
-    // Without this, a previously expired strategy would immediately expire again
-    // because is_expired() checks (now - started_at) >= time_execution_min * 60.
+    log::info!(
+        "▶️ Activating strategy '{}' ({}) → status: {} | user: {}",
+        strategy.name, strategy_id, restore_status, user_id
+    );
+
     collection.update_one(
         doc! { "user_id": user_id },
         doc! { "$set": {
-            format!("{}.status", p): "monitoring",
+            format!("{}.status", p): restore_status,
             format!("{}.is_active", p): true,
             format!("{}.started_at", p): now,
             format!("{}.error_message", p): mongodb::bson::Bson::Null,

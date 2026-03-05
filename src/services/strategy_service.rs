@@ -298,29 +298,31 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 }
 
                 // ── Balance check: verificar se tem saldo suficiente do token para vender ──
+                // IMPORTANTE: Sempre usar o saldo REAL da exchange ao invés de position.quantity,
+                // porque fees da compra fazem o saldo real ser ligeiramente menor que o estimado.
                 if let Some(ref bals) = balances {
                     let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
-                    if token_free < sell_amount * 0.95 { // 5% margem para arredondamento
-                        if token_free > 0.0 {
-                            // Saldo parcial: vende o que tem disponível
-                            log::warn!(
-                                "⚠️ [{}] Saldo parcial para vender: precisa {:.6} {} mas tem {:.6}. Vendendo saldo disponível.",
-                                strategy.strategy_id, sell_amount, base_asset, token_free
-                            );
-                            sell_amount = token_free;
-                        } else {
-                            log::warn!(
-                                "⚠️ [{}] SALDO ZERO para vender {:.6} {}! Venda BLOQUEADA.",
-                                strategy.strategy_id, sell_amount, base_asset
-                            );
-                            signal.acted = false;
-                            signal.message = format!(
-                                "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas não tem saldo disponível na exchange. Verifique seu saldo.",
-                                sell_amount, base_asset
-                            );
-                            signal.signal_type = SignalType::Info;
-                            continue;
-                        }
+                    if token_free <= 0.0 {
+                        log::warn!(
+                            "⚠️ [{}] SALDO ZERO para vender {:.6} {}! Venda BLOQUEADA.",
+                            strategy.strategy_id, sell_amount, base_asset
+                        );
+                        signal.acted = false;
+                        signal.message = format!(
+                            "⚠️ Saldo insuficiente! Precisa de {:.6} {} para vender, mas não tem saldo disponível na exchange. Verifique seu saldo.",
+                            sell_amount, base_asset
+                        );
+                        signal.signal_type = SignalType::Info;
+                        continue;
+                    }
+                    if token_free < sell_amount {
+                        // Saldo real é menor que position.quantity (normal por causa de fees da compra)
+                        // Usa o saldo real da exchange para evitar "insufficient balance"
+                        log::warn!(
+                            "⚠️ [{}] Ajustando sell_amount: position.qty={:.6} mas saldo real={:.6} {}. Usando saldo real.",
+                            strategy.strategy_id, sell_amount, token_free, base_asset
+                        );
+                        sell_amount = token_free;
                     }
                 }
 
@@ -392,29 +394,29 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     if qty <= 0.0 { continue; }
 
                     // ── Balance check: verificar saldo do token para stop loss ──
+                    // IMPORTANTE: Sempre usar saldo REAL da exchange (fees da compra reduzem o saldo)
                     if let Some(ref bals) = balances {
                         let token_free = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
-                        if token_free < qty * 0.95 {
-                            if token_free > 0.0 {
-                                // Saldo parcial: vende o que tem disponível
-                                log::warn!(
-                                    "⚠️ [{}] Saldo parcial para stop loss: precisa {:.6} {} mas tem {:.6}. Vendendo saldo disponível.",
-                                    strategy.strategy_id, qty, base_asset, token_free
-                                );
-                                qty = token_free;
-                            } else {
-                                log::warn!(
-                                    "⚠️ [{}] SALDO ZERO para stop loss! Precisa: {:.6} {}. Venda BLOQUEADA.",
-                                    strategy.strategy_id, qty, base_asset
-                                );
-                                signal.acted = false;
-                                signal.message = format!(
-                                    "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas não tem saldo. Verifique seu saldo na exchange.",
-                                    qty, base_asset
-                                );
-                                signal.signal_type = SignalType::Info;
-                                continue;
-                            }
+                        if token_free <= 0.0 {
+                            log::warn!(
+                                "⚠️ [{}] SALDO ZERO para stop loss! Precisa: {:.6} {}. Venda BLOQUEADA.",
+                                strategy.strategy_id, qty, base_asset
+                            );
+                            signal.acted = false;
+                            signal.message = format!(
+                                "⚠️ Saldo insuficiente para stop loss! Precisa de {:.6} {} mas não tem saldo. Verifique seu saldo na exchange.",
+                                qty, base_asset
+                            );
+                            signal.signal_type = SignalType::Info;
+                            continue;
+                        }
+                        if token_free < qty {
+                            // Saldo real é menor que position.quantity (normal por causa de fees)
+                            log::warn!(
+                                "⚠️ [{}] Ajustando stop loss qty: position.qty={:.6} mas saldo real={:.6} {}. Usando saldo real.",
+                                strategy.strategy_id, qty, token_free, base_asset
+                            );
+                            qty = token_free;
                         }
                     }
 

@@ -328,32 +328,39 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                 let mut sell_amount = calc_sell_amount(strategy, &signal.signal_type);
                 if sell_amount <= 0.0 { continue; }
 
-                // ── Double-check: se invested_amount preenchido, verificar lucro real ──
-                // Garante que o valor atual do investimento é REALMENTE maior que o investido.
-                // Protege contra slippage, fees inesperadas, ou pequenas variações de preço.
+                // ── Double-check: verificar lucro LÍQUIDO real (após taxas de compra + venda) ──
+                // Fórmula: qty_recebida = invested/(price_compra) * (1-fee)  [taxa compra paga no token]
+                //          receita_venda = qty * price_atual * (1-fee)        [taxa venda a pagar]
+                //          pnl_liquido   = receita_venda - invested
                 let config = &strategy.config;
                 if config.invested_amount > 0.0 && config.base_price > 0.0 {
-                    let estimated_qty = config.invested_amount / config.base_price;
-                    let current_value = estimated_qty * price;
-                    let estimated_pnl = current_value - config.invested_amount;
+                    let fee = config.fee_percent / 100.0;
+                    // Qty que o usuário realmente recebeu descontando a taxa de compra
+                    let qty_received = config.invested_amount / config.base_price * (1.0 - fee);
+                    // Receita líquida da venda já descontando a taxa de venda
+                    let net_revenue = qty_received * price * (1.0 - fee);
+                    let estimated_pnl = net_revenue - config.invested_amount;
                     if estimated_pnl <= 0.0 {
                         log::warn!(
-                            "⚠️ [{}] DOUBLE-CHECK: trigger atingido mas investimento NÃO dá lucro real! \
-                            Investido: ${:.2}, Valor atual: ${:.2}, PnL estimado: ${:.2}. Venda BLOQUEADA — aguardando preço melhor.",
-                            strategy.strategy_id, config.invested_amount, current_value, estimated_pnl
+                            "⚠️ [{}] DOUBLE-CHECK: trigger atingido mas PnL LÍQUIDO é negativo! \
+                            Investido: ${:.4}, Receita líq. (c/ {:.2}% fee×2): ${:.4}, PnL: ${:.4}. \
+                            Venda BLOQUEADA — aguardando preço cobrir taxas+lucro.",
+                            strategy.strategy_id, config.invested_amount, config.fee_percent, net_revenue, estimated_pnl
                         );
                         signal.acted = false;
                         signal.message = format!(
-                            "⚠️ DOUBLE-CHECK: Trigger atingido (preço {:.2}) mas investimento de ${:.2} \
-                            valeria ${:.2} agora (PnL: {:+.2}$). Venda bloqueada — aguardando lucro real.",
-                            price, config.invested_amount, current_value, estimated_pnl
+                            "⚠️ Preço atual {:.4} ainda não cobre o custo de entrada mais as taxas ({:.2}%×2). \
+                             Investido: ${:.2} | Receita líquida estimada: ${:.2} | PnL: {:+.4}$. \
+                             Aguardando preço atingir o break-even com taxas.",
+                            price, config.fee_percent, config.invested_amount, net_revenue, estimated_pnl
                         );
                         signal.signal_type = SignalType::Info;
                         continue;
                     }
+                    let pnl_pct = estimated_pnl / config.invested_amount * 100.0;
                     log::info!(
-                        "✅ [{}] DOUBLE-CHECK OK: Investido ${:.2} → atual ${:.2} (lucro: +${:.2}). Prosseguindo com venda.",
-                        strategy.strategy_id, config.invested_amount, current_value, estimated_pnl
+                        "✅ [{}] DOUBLE-CHECK OK: Investido ${:.4} → receita líq. ${:.4} (fee {:.2}%×2 | lucro: +${:.4} / {:+.2}%). Prosseguindo.",
+                        strategy.strategy_id, config.invested_amount, net_revenue, config.fee_percent, estimated_pnl, pnl_pct
                     );
                 }
 
@@ -387,9 +394,15 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     // Usa free se disponível, senão usa total (ex: tokens em Earn, API quirks)
                     let available = if token_free > 0.0 { token_free } else { token_total };
                     if available < sell_amount {
+                        let diff = sell_amount - available;
+                        let entry_price = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
+                        let fee_estimate = if entry_price > 0.0 {
+                            format!(" (taxa estimada na compra: ~{:.4} {} ≈ ${:.4})",
+                                diff, base_asset, diff * entry_price)
+                        } else { String::new() };
                         log::warn!(
-                            "⚠️ [{}] Ajustando sell_amount: {:.6} → {:.6} {} (free={:.6}, total={:.6}).",
-                            strategy.strategy_id, sell_amount, available, base_asset, token_free, token_total
+                            "⚠️ [{}] Saldo real ({:.6} {}) < qty calculada ({:.6}){} — ajustando para disponível.",
+                            strategy.strategy_id, available, base_asset, sell_amount, fee_estimate
                         );
                         sell_amount = available;
                     }
@@ -399,22 +412,31 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     Ok(order) => {
                         signal.acted = true;
                         let entry = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
+                        let total_cost = strategy.position.as_ref().map(|p| p.total_cost).unwrap_or(0.0);
+                        let pos_qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(sell_amount);
                         let filled = order.filled.unwrap_or(sell_amount);
                         let sell_price = order.avg_price.unwrap_or(price);
-                        let pnl = (sell_price - entry) * filled;
-                        let fee = order.fee.unwrap_or(0.0);
+                        let fee_pct = strategy.config.fee_percent / 100.0;
+                        // PnL líquido: receita líquida da venda (pós taxa venda) - custo proporcional da compra (pós taxa compra)
+                        // Para venda parcial, proporcionalizamos o custo total pelo percentual vendido
+                        let sell_fraction = if pos_qty > 0.0 { filled / pos_qty } else { 1.0 };
+                        let cost_basis = if total_cost > 0.0 { total_cost * sell_fraction } else { entry * filled * (1.0 + fee_pct) };
+                        let net_sell_revenue = sell_price * filled * (1.0 - fee_pct);
+                        let pnl = net_sell_revenue - cost_basis;
+                        let fee = order.fee.unwrap_or(sell_price * filled * fee_pct);
                         let reason = match signal.signal_type {
                             SignalType::GradualSell => "gradual_sell".to_string(),
                             _ => "take_profit".to_string(),
                         };
-                        log::info!("✅ [{}] {} executed: {:.6} {} @ {:.4} | PnL: ${:.2}",
-                            strategy.strategy_id, reason, filled, strategy.symbol, sell_price, pnl - fee);
+                        let pnl_pct = if cost_basis > 0.0 { pnl / cost_basis * 100.0 } else { 0.0 };
+                        log::info!("✅ [{}] {} executed: {:.6} {} @ {:.4} | PnL líq.: ${:.4} ({:+.2}%) [receita: ${:.4} - custo: ${:.4}]",
+                            strategy.strategy_id, reason, filled, strategy.symbol, sell_price, pnl, pnl_pct, net_sell_revenue, cost_basis);
                         executions.push(StrategyExecution {
                             execution_id: uuid::Uuid::new_v4().to_string(),
                             action: ExecutionAction::Sell, reason: reason.clone(),
                             price: sell_price, amount: filled,
                             total: order.cost.unwrap_or(sell_price * filled),
-                            fee, pnl_usd: pnl - fee,
+                            fee, pnl_usd: pnl,
                             exchange_order_id: Some(order.order_id),
                             executed_at: now, error_message: None, source: None,
                         });
@@ -483,9 +505,15 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
 
                         let available = if token_free > 0.0 { token_free } else { token_total };
                         if available < qty {
+                            let diff = qty - available;
+                            let entry_price = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
+                            let fee_estimate = if entry_price > 0.0 {
+                                format!(" (taxa estimada na compra: ~{:.4} {} ≈ ${:.4})",
+                                    diff, base_asset, diff * entry_price)
+                            } else { String::new() };
                             log::warn!(
-                                "⚠️ [{}] Ajustando stop loss qty: {:.6} → {:.6} {} (free={:.6}, total={:.6}).",
-                                strategy.strategy_id, qty, available, base_asset, token_free, token_total
+                                "⚠️ [{}] Stop loss: saldo real ({:.6} {}) < qty calculada ({:.6}){} — ajustando.",
+                                strategy.strategy_id, available, base_asset, qty, fee_estimate
                             );
                             qty = available;
                         }
@@ -495,18 +523,23 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                         Ok(order) => {
                             signal.acted = true;
                             let entry = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
+                            let total_cost = strategy.position.as_ref().map(|p| p.total_cost).unwrap_or(0.0);
                             let filled = order.filled.unwrap_or(qty);
                             let sell_price = order.avg_price.unwrap_or(price);
-                            let pnl = (sell_price - entry) * filled;
-                            let fee = order.fee.unwrap_or(0.0);
-                            log::warn!("🛑 [{}] STOP LOSS executed: {:.6} {} @ {:.4} | Loss: ${:.2}",
-                                strategy.strategy_id, filled, strategy.symbol, sell_price, pnl - fee);
+                            let fee_pct = strategy.config.fee_percent / 100.0;
+                            // PnL líquido stop loss: receita líquida (pós fee venda) - custo total da compra
+                            let net_sell_revenue = sell_price * filled * (1.0 - fee_pct);
+                            let cost_basis = if total_cost > 0.0 { total_cost } else { entry * filled * (1.0 + fee_pct) };
+                            let pnl = net_sell_revenue - cost_basis;
+                            let fee = order.fee.unwrap_or(sell_price * filled * fee_pct);
+                            log::warn!("🛑 [{}] STOP LOSS executed: {:.6} {} @ {:.4} | Perda líq.: ${:.4} [receita: ${:.4} - custo: ${:.4}]",
+                                strategy.strategy_id, filled, strategy.symbol, sell_price, pnl, net_sell_revenue, cost_basis);
                             executions.push(StrategyExecution {
                                 execution_id: uuid::Uuid::new_v4().to_string(),
                                 action: ExecutionAction::Sell, reason: "stop_loss".into(),
                                 price: sell_price, amount: filled,
                                 total: order.cost.unwrap_or(sell_price * filled),
-                                fee, pnl_usd: pnl - fee,
+                                fee, pnl_usd: pnl,
                                 exchange_order_id: Some(order.order_id),
                                 executed_at: now, error_message: None, source: None,
                             });
@@ -849,7 +882,10 @@ fn evaluate_exit(strategy: &StrategyItem, price: f64, now: i64, signals: &mut Ve
     let pct = ((price - entry) / entry) * 100.0;
     let trigger = config.trigger_price();
     let sl_price = config.stop_loss_price();
-    let unrealized_pnl = (price - entry) * position.quantity;
+    // PnL não realizado líquido: receita líquida se vender agora - total investido
+    // Considera taxa de compra (já paga, embutida no total_cost) e taxa de venda (a pagar)
+    let fee_pct = config.fee_percent / 100.0;
+    let unrealized_pnl = price * position.quantity * (1.0 - fee_pct) - position.total_cost;
 
     if price >= trigger {
         if config.gradual_sell && !config.gradual_lots.is_empty() {
@@ -976,7 +1012,8 @@ fn evaluate_gradual(strategy: &StrategyItem, price: f64, now: i64, signals: &mut
     }
     let pct = ((price - entry) / entry) * 100.0;
     let sl_price = config.stop_loss_price();
-    let unrealized_pnl = (price - entry) * position.quantity;
+    let fee_pct = config.fee_percent / 100.0;
+    let unrealized_pnl = price * position.quantity * (1.0 - fee_pct) - position.total_cost;
     let executed_lots = config.gradual_lots.iter().filter(|l| l.executed).count();
     let total_lots = config.gradual_lots.len();
 
@@ -1121,9 +1158,28 @@ pub struct OrderResult {
 
 /// Classify raw CCXT/exchange errors into user-friendly messages
 fn classify_order_error(raw: &str, symbol: &str, exchange_name: &str) -> String {
+    classify_order_error_with_amounts(raw, symbol, exchange_name, None, None)
+}
+
+fn classify_order_error_with_amounts(raw: &str, symbol: &str, exchange_name: &str, tried: Option<f64>, available: Option<f64>) -> String {
     let lower = raw.to_lowercase();
     if lower.contains("insufficient") || lower.contains("balance") || lower.contains("not enough") {
-        format!("Insufficient balance on {} to sell {}. Check your exchange balance.", exchange_name, symbol)
+        let parts: Vec<String> = symbol.split('/').map(str::to_string).collect();
+        let base = parts.first().cloned().unwrap_or_else(|| symbol.to_string());
+        let detail = match (tried, available) {
+            (Some(t), Some(a)) => format!(
+                "Tentou vender {:.6} {} mas apenas {:.6} disponível na {}. \
+                 Diferença de {:.6} {} provavelmente paga como taxa na compra.",
+                t, base, a, exchange_name, t - a, base
+            ),
+            _ => format!(
+                "Saldo insuficiente na {} para vender {}. \
+                 A quantidade calculada pode ser maior que o disponível pois as \
+                 taxas de compra foram descontadas do token recebido.",
+                exchange_name, symbol
+            ),
+        };
+        detail
     } else if lower.contains("minimum") || lower.contains("min order") || lower.contains("too small") {
         format!("Order amount too small for {} on {}. Minimum order size not met.", symbol, exchange_name)
     } else if lower.contains("authentication") || lower.contains("invalid api") || lower.contains("apikey") {

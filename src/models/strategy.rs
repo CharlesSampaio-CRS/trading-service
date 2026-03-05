@@ -142,14 +142,36 @@ impl Default for StrategyConfig {
 }
 
 impl StrategyConfig {
+    /// Preço alvo de take profit considerando AMBAS as taxas (compra + venda).
+    ///
+    /// Matemática:
+    ///   custo_real   = base_price × (1 + fee)   ← você pagou taxa na compra
+    ///   receita_venda = tp_price  × (1 - fee)   ← você pagará taxa na venda
+    ///   lucro_líquido = tp_pct%   →  tp_price × (1-fee) = base_price × (1+fee) × (1 + tp%)
+    ///   tp_price = base_price × (1+fee) × (1+tp%) / (1-fee)
+    ///
+    /// Exemplo: base=$0.92, TP=6%, fee=0.2%
+    ///   tp_price = 0.92 × 1.002 × 1.06 / 0.998 = $0.9789
+    ///   (vs. fórmula anterior sem taxa dupla: $0.9770 — subestimava em ~$0.0019)
     pub fn trigger_price(&self) -> f64 {
-        let tp_factor = self.take_profit_percent / 100.0;
+        let tp_factor  = self.take_profit_percent / 100.0;
         let fee_factor = self.fee_percent / 100.0;
-        self.base_price * (1.0 + tp_factor + fee_factor)
+        // Taxa na compra já foi paga → aumenta o custo efetivo
+        // Taxa na venda será paga   → reduz a receita efetiva
+        self.base_price * (1.0 + fee_factor) * (1.0 + tp_factor) / (1.0 - fee_factor)
     }
 
+    /// Preço alvo de stop loss considerando a taxa que será paga na venda.
+    ///
+    /// Para limitar a perda líquida a `stop_loss_pct`% levando em conta ambas as taxas:
+    ///   sl_price = base_price × (1+fee) × (1 - sl%) / (1-fee)
+    ///
+    /// Isso faz o stop disparar ligeiramente antes do que sem taxas,
+    /// garantindo que a perda real (incluindo fee de venda) não exceda o limite.
     pub fn stop_loss_price(&self) -> f64 {
-        self.base_price * (1.0 - self.stop_loss_percent / 100.0)
+        let sl_factor  = self.stop_loss_percent / 100.0;
+        let fee_factor = self.fee_percent / 100.0;
+        self.base_price * (1.0 + fee_factor) * (1.0 - sl_factor) / (1.0 - fee_factor)
     }
 
     /// Preço que aciona auto-compra na queda. Ex: base_price $100, dip 5% → $95
@@ -158,32 +180,48 @@ impl StrategyConfig {
     }
 
     pub fn gradual_trigger_price(&self, lot_index: usize) -> f64 {
-        let base_tp = self.take_profit_percent / 100.0;
-        let fee = self.fee_percent / 100.0;
-        let gradual_step = self.gradual_take_percent / 100.0;
-        self.base_price * (1.0 + base_tp + fee + gradual_step * lot_index as f64)
+        let base_tp       = self.take_profit_percent / 100.0;
+        let fee           = self.fee_percent / 100.0;
+        let gradual_step  = self.gradual_take_percent / 100.0;
+        // Mesmo critério da trigger_price: cobre taxa de compra + taxa de venda + lucro desejado
+        let effective_tp  = base_tp + gradual_step * lot_index as f64;
+        self.base_price * (1.0 + fee) * (1.0 + effective_tp) / (1.0 - fee)
     }
 
-    /// Calcula a quantidade estimada de moedas com base no investimento.
-    /// Ex: invested $36, base_price $140 → 0.2571 moedas
+    /// Calcula a quantidade estimada de moedas com base no investimento,
+    /// já descontando a taxa de compra (tokens que você realmente recebe).
+    /// Ex: invested $15.5, base_price $0.92, fee 0.2% → 16.813 SUI (não 16.847)
     pub fn estimated_quantity(&self) -> f64 {
         if self.invested_amount > 0.0 && self.base_price > 0.0 {
-            self.invested_amount / self.base_price
+            let gross_qty = self.invested_amount / self.base_price;
+            let fee_factor = self.fee_percent / 100.0;
+            gross_qty * (1.0 - fee_factor) // desconta taxa de compra paga no token
         } else {
             0.0
         }
     }
 
-    /// Calcula PnL estimado em $ baseado no invested_amount e variação de preço.
-    /// Ex: invested $36, preço subiu 10% → PnL estimado = +$3.60
+    /// Calcula PnL líquido estimado em $ baseado no invested_amount e preço atual,
+    /// já considerando as taxas de compra (paga) e venda (a ser paga).
     pub fn estimated_pnl(&self, current_price: f64) -> Option<f64> {
         if self.invested_amount > 0.0 && self.base_price > 0.0 {
-            let qty = self.invested_amount / self.base_price;
-            let current_value = qty * current_price;
-            Some(current_value - self.invested_amount)
+            let fee = self.fee_percent / 100.0;
+            let qty_received = self.invested_amount / self.base_price * (1.0 - fee);
+            let sell_revenue = qty_received * current_price * (1.0 - fee); // descontando fee de venda
+            Some(sell_revenue - self.invested_amount)
         } else {
             None
         }
+    }
+
+    /// Lucro líquido em % que o usuário verá no bolso ao atingir o TP,
+    /// levando em conta as duas taxas.
+    pub fn net_profit_percent_at_tp(&self) -> f64 {
+        let tp = self.trigger_price();
+        let fee = self.fee_percent / 100.0;
+        let qty = self.invested_amount / self.base_price * (1.0 - fee);
+        let revenue = qty * tp * (1.0 - fee);
+        (revenue - self.invested_amount) / self.invested_amount * 100.0
     }
 }
 

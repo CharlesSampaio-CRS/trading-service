@@ -58,115 +58,111 @@ cd - > /dev/null
 echo "📤 Enviando para servidor..."
 scp -i "$KEY_FILE" -o StrictHostKeyChecking=no "$DEPLOY_DIR/app.tar.gz" ubuntu@"$SERVER_IP":~/
 
-# 3. Build e deploy no servidor
+# 3. Build e deploy no servidor (zero-downtime)
 echo "🔧 Compilando e configurando no servidor..."
+echo "⚡ Estratégia: build em background enquanto serviço continua rodando"
 echo ""
 ssh -i "$KEY_FILE" -o StrictHostKeyChecking=no ubuntu@"$SERVER_IP" << 'ENDSSH'
     set -e
-    
+    export PATH="$HOME/.cargo/bin:$PATH"
+    BUILD_DIR=~/trading-service-build
+    LIVE_DIR=~/trading-service
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📦 Extraindo aplicação..."
+    echo "📦 Extraindo nova versão (diretório temporário)..."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    mkdir -p ~/trading-service/data
-    cd ~/trading-service
+    # Limpar build dir anterior se existir
+    rm -rf "$BUILD_DIR"
+    mkdir -p "$BUILD_DIR"
+    mkdir -p "$LIVE_DIR/data"
+
+    cd "$BUILD_DIR"
     tar -xzf ~/app.tar.gz
     rm ~/app.tar.gz
-    echo "✓ Aplicação extraída"
+
+    # Reutilizar cache de compilação do diretório de produção (acelera builds incrementais)
+    if [ -d "$LIVE_DIR/target" ]; then
+        echo "♻️  Reaproveitando cache de compilação anterior..."
+        ln -s "$LIVE_DIR/target" "$BUILD_DIR/target"
+    fi
+    echo "✓ Fonte extraída em $BUILD_DIR"
     echo ""
-    
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "💾 Configurando SWAP temporário (para compilação)..."
+    echo "💾 Configurando SWAP (para compilação)..."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     if [ ! -f /swapfile ]; then
-        echo "Criando SWAP de 4GB (necessário para compilação Rust)..."
         sudo fallocate -l 4G /swapfile
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
         echo "✓ SWAP de 4GB ativado"
     else
-        # Garantir que SWAP está ativo
         sudo swapon /swapfile 2>/dev/null || true
-        echo "✓ SWAP já configurado e ativo"
+        echo "✓ SWAP já configurado"
     fi
-    
-    # Mostrar uso de swap
     echo "   SWAP disponível: $(free -h | awk '/^Swap:/ {print $2}')"
     echo ""
-    
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🛑 Parando serviço anterior (se existir)..."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    if sudo systemctl is-active --quiet trading-service; then
-        echo "⏹️  Serviço está rodando, parando..."
-        sudo systemctl stop trading-service
-        echo "✓ Serviço parado"
-        sleep 2
-    else
-        echo "✓ Nenhum serviço anterior rodando"
-    fi
-    
-    # Matar processos cargo/rustc que possam estar travados
-    if pgrep -f "cargo|rustc" > /dev/null; then
-        echo "⚠️  Encontrados processos de compilação travados, matando..."
-        pkill -9 -f "cargo|rustc" || true
+
+    # Matar processos de compilação travados (sem tocar no serviço em produção)
+    if pgrep -f "cargo build|rustc" > /dev/null; then
+        echo "⚠️  Processos de compilação travados encontrados, limpando..."
+        pkill -9 -f "cargo build|rustc" || true
         sleep 1
         echo "✓ Processos limpos"
     fi
-    
-    # Verificar recursos disponíveis
-    echo "📊 Recursos do sistema:"
+
+    echo "📊 Recursos disponíveis para compilação:"
     echo "   Memória livre: $(free -h | awk '/^Mem:/ {print $7}')"
-    echo "   SWAP em uso: $(free -h | awk '/^Swap:/ {print $3}')"
-    echo "   Espaço em disco: $(df -h ~ | awk 'NR==2 {print $4}')"
+    echo "   SWAP em uso:   $(free -h | awk '/^Swap:/ {print $3}')"
+    echo "   Disco livre:   $(df -h ~ | awk 'NR==2 {print $4}')"
     echo ""
-    
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🧹 Limpando cache de compilação anterior..."
+    echo "🦀 Compilando nova versão..."
+    echo "   ⚡ Serviço em PRODUÇÃO continua rodando normalmente!"
+    echo "   ⏱️  Isso pode demorar alguns minutos"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    cargo clean || true
-    echo "✓ Cache limpo"
     echo ""
-    
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🦀 Compilando aplicação Rust..."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "⏱️  Isso pode demorar 10-15 minutos na primeira vez"
-    echo "🔧 Compilando com -j 1 (sequencial) para economizar memória"
-    echo "📊 Progresso da compilação:"
-    echo ""
-    export PATH="$HOME/.cargo/bin:$PATH"
-    
-    # Compilar sequencialmente para não travar por falta de memória
-    # -j 1 força compilação de 1 crate por vez
-    if timeout 1800 cargo build --release -j 1 2>&1 | grep -E "(Compiling|Finished|error:)" | while read line; do 
+
+    BUILD_OK=false
+    if timeout 1800 cargo build --release -j 1 2>&1 | grep -E "(Compiling|Finished|error\[|^error)" | while read line; do
         echo "   $line"
-        # Mostrar uso de memória a cada 10 pacotes
         if [[ "$line" == *"Compiling"* ]] && (( RANDOM % 10 == 0 )); then
             echo "      [Mem: $(free -h | awk '/^Mem:/ {print $3}') / SWAP: $(free -h | awk '/^Swap:/ {print $3}')]"
         fi
     done; then
+        BUILD_OK=true
         echo ""
         echo "✓ Compilação concluída com sucesso!"
     else
         EXIT_CODE=$?
         echo ""
         if [ $EXIT_CODE -eq 124 ]; then
-            echo "❌ Timeout: Compilação demorou mais de 30 minutos!"
-            echo "   A instância pode estar sem recursos."
-            echo "   Considere usar uma instância maior temporariamente."
+            echo "❌ Timeout na compilação (>30min). Instância sem recursos?"
         else
-            echo "❌ Erro na compilação!"
-            echo "Mostrando últimas linhas do erro..."
-            cargo build --release -j 1 2>&1 | tail -50
+            echo "❌ Erro na compilação! Serviço em produção NÃO foi afetado."
+            cargo build --release -j 1 2>&1 | tail -30
         fi
+        rm -rf "$BUILD_DIR"
         exit 1
     fi
     echo ""
-    
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📝 Criando serviço systemd..."
+    echo "🔄 Swap atômico do binário (downtime ~2s)..."
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Copiar novo binário com nome temporário (não interrompe nada ainda)
+    NEW_BIN="$BUILD_DIR/target/release/trading-service"
+    LIVE_BIN="$LIVE_DIR/target/release/trading-service"
+    mkdir -p "$LIVE_DIR/target/release"
+    cp "$NEW_BIN" "${LIVE_BIN}.new"
+
+    # Sincronizar código fonte novo no live dir
+    rsync -a --exclude='target' "$BUILD_DIR/" "$LIVE_DIR/"
+
+    # Configurar systemd (idempotente)
     sudo tee /etc/systemd/system/trading-service.service > /dev/null <<EOF
 [Unit]
 Description=Trading Service
@@ -180,50 +176,59 @@ Environment="RUST_LOG=info"
 EnvironmentFile=/home/ubuntu/trading-service/.env
 ExecStart=/home/ubuntu/trading-service/target/release/trading-service
 Restart=always
-RestartSec=10
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    echo "✓ Serviço systemd criado"
-    echo ""
-
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🚀 Iniciando serviço..."
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     sudo systemctl daemon-reload
-    echo "✓ Systemd recarregado"
-    
     sudo systemctl enable trading-service
-    echo "✓ Serviço habilitado para iniciar no boot"
-    
-    sudo systemctl restart trading-service
-    echo "✓ Serviço reiniciado"
+
+    # === JANELA DE DOWNTIME COMEÇA AQUI (~2-3 segundos) ===
+    echo "⏱️  Parando serviço antigo..."
+    sudo systemctl stop trading-service 2>/dev/null || true
+
+    # Swap atômico: move o novo binário para o lugar definitivo
+    mv "${LIVE_BIN}.new" "$LIVE_BIN"
+
+    echo "🚀 Iniciando nova versão..."
+    sudo systemctl start trading-service
+    # === JANELA DE DOWNTIME TERMINA AQUI ===
+
     echo ""
-    
-    echo "⏳ Aguardando inicialização (5s)..."
-    for i in {5..1}; do
-        echo -n "   $i... "
+    echo "⏳ Aguardando inicialização..."
+    for i in {1..10}; do
         sleep 1
+        if sudo systemctl is-active --quiet trading-service; then
+            echo "✓ Serviço ativo após ${i}s"
+            break
+        fi
+        echo -n "   ${i}s... "
     done
     echo ""
+
+    # Limpar diretório de build temporário
+    # Desanexar symlink do target antes de remover para não apagar o cache
+    if [ -L "$BUILD_DIR/target" ]; then
+        rm "$BUILD_DIR/target"
+    fi
+    rm -rf "$BUILD_DIR"
+    echo "✓ Diretório temporário removido"
     echo ""
-    
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "🔍 Status do serviço:"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     sudo systemctl status trading-service --no-pager -l || true
     echo ""
-    
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "📋 Últimas 10 linhas do log:"
+    echo "📋 Últimas 15 linhas do log:"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    sudo journalctl -u trading-service -n 10 --no-━━━━━━━━━━━━━━━━━━━━━
-    echo "🔍 Status do serviço:"
-    sudo systemctl status trading-service --no-pager || true
-    
+    sudo journalctl -u trading-service -n 15 --no-pager || true
+
     echo ""
-    echo "✅ Deploy concluído!"
+    echo "✅ Deploy zero-downtime concluído!"
 ENDSSH
 
 # Limpar

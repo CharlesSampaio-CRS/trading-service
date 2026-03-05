@@ -364,47 +364,56 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     );
                 }
 
-                // ── Balance check: verificar se tem saldo do token para vender ──
-                // Usa `total` (free + locked) como existência, e `free` para ajustar qty.
-                // Se total=0 → bloqueia (sem tokens). Se total>0 → tenta a ordem;
-                // a exchange é a fonte de verdade: ela rejeita se realmente não puder.
-                // Nota: MEXC e outras exchanges podem retornar free=0 mesmo sem ordens
-                // abertas (tokens em Earn/Savings, ou bug de parsing). Por isso não
-                // bloqueamos quando free=0 mas total>0.
-                if let Some(ref bals) = balances {
-                    let token_free  = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
-                    let token_total = bals.get(&base_asset).map(|b| b.total).unwrap_or(0.0);
-
-                    if token_total <= 0.0 {
-                        // Realmente não tem o token na exchange
+                // ── Live balance check: query CCXT em tempo real antes de executar a venda ──
+                // Faz uma consulta FRESCA à exchange para garantir que o token está disponível
+                // no momento exato da venda (não depende do saldo pré-carregado do ciclo).
+                match fetch_balance(exchange).await {
+                    Err(e) => {
                         log::warn!(
-                            "⚠️ [{}] SALDO ZERO para vender {:.6} {}! Venda BLOQUEADA.",
-                            strategy.strategy_id, sell_amount, base_asset
+                            "⚠️ [{}] Não foi possível verificar saldo live antes da venda ({}): BLOQUEADO por segurança.",
+                            strategy.strategy_id, e
                         );
                         signal.acted = false;
                         signal.message = format!(
-                            "⚠️ Saldo zerado! Não há {} na exchange. Verifique se os tokens ainda estão na sua conta.",
-                            base_asset
+                            "⚠️ Venda bloqueada: falha ao consultar saldo na exchange. Erro: {}",
+                            e
                         );
                         signal.signal_type = SignalType::Info;
                         continue;
                     }
+                    Ok(live_bals) => {
+                        let live_free  = live_bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                        let live_total = live_bals.get(&base_asset).map(|b| b.total).unwrap_or(0.0);
 
-                    // Tem tokens — determina quanto pode vender
-                    // Usa free se disponível, senão usa total (ex: tokens em Earn, API quirks)
-                    let available = if token_free > 0.0 { token_free } else { token_total };
-                    if available < sell_amount {
-                        let diff = sell_amount - available;
-                        let entry_price = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
-                        let fee_estimate = if entry_price > 0.0 {
-                            format!(" (taxa estimada na compra: ~{:.4} {} ≈ ${:.4})",
-                                diff, base_asset, diff * entry_price)
-                        } else { String::new() };
-                        log::warn!(
-                            "⚠️ [{}] Saldo real ({:.6} {}) < qty calculada ({:.6}){} — ajustando para disponível.",
-                            strategy.strategy_id, available, base_asset, sell_amount, fee_estimate
-                        );
-                        sell_amount = available;
+                        if live_total <= 0.0 {
+                            log::warn!(
+                                "⚠️ [{}] Saldo live ZERO para {}! Não há tokens para vender. Venda BLOQUEADA.",
+                                strategy.strategy_id, base_asset
+                            );
+                            signal.acted = false;
+                            signal.message = format!(
+                                "⚠️ Saldo zerado! Não há {} disponível na exchange (verificação live). Verifique se os tokens ainda estão na sua conta.",
+                                base_asset
+                            );
+                            signal.signal_type = SignalType::Info;
+                            continue;
+                        }
+
+                        // Usa free se disponível, senão total (ex: tokens em Earn/Savings, API quirks)
+                        let live_available = if live_free > 0.0 { live_free } else { live_total };
+                        if live_available < sell_amount {
+                            let diff = sell_amount - live_available;
+                            let entry_price = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
+                            let fee_estimate = if entry_price > 0.0 {
+                                format!(" (taxa estimada na compra: ~{:.4} {} ≈ ${:.4})",
+                                    diff, base_asset, diff * entry_price)
+                            } else { String::new() };
+                            log::warn!(
+                                "⚠️ [{}] Saldo live ({:.6} {}) < qty calculada ({:.6}){} — ajustando para disponível.",
+                                strategy.strategy_id, live_available, base_asset, sell_amount, fee_estimate
+                            );
+                            sell_amount = live_available;
+                        }
                     }
                 }
 
@@ -484,38 +493,53 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
                     let mut qty = strategy.position.as_ref().map(|p| p.quantity).unwrap_or(0.0);
                     if qty <= 0.0 { continue; }
 
-                    // ── Balance check: verificar saldo do token para stop loss ──
-                    if let Some(ref bals) = balances {
-                        let token_free  = bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
-                        let token_total = bals.get(&base_asset).map(|b| b.total).unwrap_or(0.0);
-
-                        if token_total <= 0.0 {
+                    // ── Live balance check: query CCXT em tempo real antes do stop loss ──
+                    match fetch_balance(exchange).await {
+                        Err(e) => {
                             log::warn!(
-                                "⚠️ [{}] SALDO ZERO para stop loss! Precisa: {:.6} {}. Venda BLOQUEADA.",
-                                strategy.strategy_id, qty, base_asset
+                                "⚠️ [{}] Não foi possível verificar saldo live antes do stop loss ({}): BLOQUEADO por segurança.",
+                                strategy.strategy_id, e
                             );
                             signal.acted = false;
                             signal.message = format!(
-                                "⚠️ Stop loss bloqueado: não há {} na exchange.",
-                                base_asset
+                                "⚠️ Stop loss bloqueado: falha ao consultar saldo na exchange. Erro: {}",
+                                e
                             );
                             signal.signal_type = SignalType::Info;
                             continue;
                         }
+                        Ok(live_bals) => {
+                            let live_free  = live_bals.get(&base_asset).map(|b| b.free).unwrap_or(0.0);
+                            let live_total = live_bals.get(&base_asset).map(|b| b.total).unwrap_or(0.0);
 
-                        let available = if token_free > 0.0 { token_free } else { token_total };
-                        if available < qty {
-                            let diff = qty - available;
-                            let entry_price = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
-                            let fee_estimate = if entry_price > 0.0 {
-                                format!(" (taxa estimada na compra: ~{:.4} {} ≈ ${:.4})",
-                                    diff, base_asset, diff * entry_price)
-                            } else { String::new() };
-                            log::warn!(
-                                "⚠️ [{}] Stop loss: saldo real ({:.6} {}) < qty calculada ({:.6}){} — ajustando.",
-                                strategy.strategy_id, available, base_asset, qty, fee_estimate
-                            );
-                            qty = available;
+                            if live_total <= 0.0 {
+                                log::warn!(
+                                    "⚠️ [{}] Saldo live ZERO para stop loss! {} não disponível. Venda BLOQUEADA.",
+                                    strategy.strategy_id, base_asset
+                                );
+                                signal.acted = false;
+                                signal.message = format!(
+                                    "⚠️ Stop loss bloqueado: não há {} disponível na exchange (verificação live).",
+                                    base_asset
+                                );
+                                signal.signal_type = SignalType::Info;
+                                continue;
+                            }
+
+                            let live_available = if live_free > 0.0 { live_free } else { live_total };
+                            if live_available < qty {
+                                let diff = qty - live_available;
+                                let entry_price = strategy.position.as_ref().map(|p| p.entry_price).unwrap_or(0.0);
+                                let fee_estimate = if entry_price > 0.0 {
+                                    format!(" (taxa estimada na compra: ~{:.4} {} ≈ ${:.4})",
+                                        diff, base_asset, diff * entry_price)
+                                } else { String::new() };
+                                log::warn!(
+                                    "⚠️ [{}] Stop loss: saldo live ({:.6} {}) < qty calculada ({:.6}){} — ajustando.",
+                                    strategy.strategy_id, live_available, base_asset, qty, fee_estimate
+                                );
+                                qty = live_available;
+                            }
                         }
                     }
 

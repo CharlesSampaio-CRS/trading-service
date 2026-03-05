@@ -458,13 +458,13 @@ pub struct StrategyItem {
     pub executions: Vec<StrategyExecution>,
     #[serde(default)]
     pub signals: Vec<StrategySignal>,
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub last_checked_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_price: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub last_gradual_sell_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     #[serde(default)]
     pub total_pnl_usd: f64,
@@ -477,7 +477,7 @@ pub struct StrategyItem {
     #[serde(default)]
     pub buy_dip_buys_done: i32,
     /// Soft delete: se preenchido, estratégia foi arquivada (não aparece na lista ativa)
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub deleted_at: Option<i64>,
     #[serde(deserialize_with = "ts_serde::deserialize")]
     pub started_at: i64,
@@ -540,19 +540,19 @@ pub struct StrategyResponse {
     pub position: Option<PositionInfo>,
     pub executions: Vec<StrategyExecution>,
     pub signals: Vec<StrategySignal>,
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub last_checked_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_price: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub total_pnl_usd: f64,
     pub total_executions: i32,
     pub dca_buys_done: i32,
     pub buy_dip_buys_done: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<StrategyStatsResponse>,
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "ts_serde::opt::deserialize")]
     pub deleted_at: Option<i64>,
     #[serde(deserialize_with = "ts_serde::deserialize")]
     pub started_at: i64,

@@ -136,12 +136,44 @@ pub async fn tick(db: &MongoDB, user_id: &str, strategy: &StrategyItem) -> TickR
     // ── Guard: consecutive sell/buy failures ─────────────────────────
     // If last 5 executions are all sell_failed or buy_failed, pause the strategy
     // to avoid spamming the exchange with failing orders every 30 seconds.
+    // Exception: insufficient balance errors are recoverable (user can deposit more)
+    // and should NOT trigger auto-deactivation — they just skip with a warning.
     const MAX_CONSECUTIVE_FAILURES: usize = 5;
     let recent_execs: Vec<_> = strategy.executions.iter().rev().take(MAX_CONSECUTIVE_FAILURES).collect();
     if recent_execs.len() == MAX_CONSECUTIVE_FAILURES
         && recent_execs.iter().all(|e| matches!(e.action, ExecutionAction::SellFailed | ExecutionAction::BuyFailed))
     {
         let last_err = recent_execs.first().and_then(|e| e.error_message.as_deref()).unwrap_or("unknown");
+
+        // Check if ALL recent failures are due to insufficient balance (recoverable condition)
+        let is_balance_issue = recent_execs.iter().all(|e| {
+            e.error_message.as_deref().map(|msg| {
+                let lower = msg.to_lowercase();
+                lower.contains("insufficient") || lower.contains("balance") || lower.contains("not enough")
+            }).unwrap_or(false)
+        });
+
+        if is_balance_issue {
+            // Saldo insuficiente é recuperável — não desativa, só avisa
+            log::warn!(
+                "⚠️ [{}] {} consecutive insufficient-balance failures. Strategy keeps running — add funds to resume.",
+                strategy_id, MAX_CONSECUTIVE_FAILURES
+            );
+            return TickResult {
+                strategy_id, symbol: strategy.symbol.clone(), price: 0.0,
+                signals: vec![StrategySignal {
+                    signal_type: SignalType::Info, price: 0.0,
+                    message: format!(
+                        "⚠️ Saldo insuficiente nos últimos {} ticks. A estratégia continua ativa — deposite fundos para retomar as ordens.",
+                        MAX_CONSECUTIVE_FAILURES
+                    ),
+                    acted: false, price_change_percent: 0.0, created_at: now, source: None,
+                }],
+                executions: vec![], new_status: None,  // mantém status atual, NÃO desativa
+                error: None,
+            };
+        }
+
         log::warn!(
             "🛑 [{}] {} consecutive order failures detected. Pausing strategy. Last error: {}",
             strategy_id, MAX_CONSECUTIVE_FAILURES, last_err
